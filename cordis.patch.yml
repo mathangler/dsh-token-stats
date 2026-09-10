@@ -1,0 +1,15 @@
+# dsh-token-stats — profile bundle patch.
+#
+# `dsh plugin --profile web add <this package>` runs pnpm in the profile
+# directory and then appends every dependency that declares `dsh.bundle` to
+# `dsh.profile.bundles`. This patch therefore lands after the shipped bundles
+# and before the user's own cordis.patch.yml, so a user can still override or
+# disable the row below by id.
+#
+# One row: the host half. The browser half needs no row here — the web server
+# loads it from `exports["./client"]` because package.json declares
+# `dsh.client.platform: "web"`.
+
+- insert:
+    - id: token-stats
+      name: dsh-token-stats

@@ -27,11 +27,23 @@ DeepSeek Harness 的 Token 用量统计插件，挂在设置面板里作为一�
 ## 安装
 
 ```bash
-dsh plugin --profile web add file:<本目录的绝对路径>
+dsh plugin --profile web add github:mathangler/dsh-token-stats
 ```
 
+装完重启正在运行的 `dsh web` 进程。
+
 补丁会往 profile 里插一行宿主半边。浏览器半边由 `package.json` 里的
-`dsh.client.platform: web` 声明自动加载。装完需要重启正在运行的 `dsh web` 进程。
+`dsh.client.platform: web` 声明自动加载。开发与验证基于 DSH `0.1.5-rc.1`。
+
+要更新已安装的副本，必须先移除再安装 —— spec 不变时 pnpm 不会重新解析 git HEAD：
+
+```bash
+dsh plugin --profile web remove dsh-token-stats
+dsh plugin --profile web add github:mathangler/dsh-token-stats
+```
+
+在网络受限的环境里 `github.com` 本身可能不可达，但**安装仍然可用**：
+pnpm 是从 `codeload.github.com` 取 tarball 的，那是另一个主机。
 
 ## 数字是怎么来的
 

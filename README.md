@@ -34,12 +34,26 @@ K / M / B in English.
 ## Install
 
 ```bash
-dsh plugin --profile web add file:<absolute path to this directory>
+dsh plugin --profile web add github:mathangler/dsh-token-stats
 ```
+
+Then restart the running `dsh web` process.
 
 The bundle patch inserts one host row into the profile. The browser half is
 loaded automatically because `package.json` declares `dsh.client.platform: web`.
-Restart the running `dsh web` process afterwards.
+Built and verified against DSH `0.1.5-rc.1`.
+
+To update an installed copy, remove it first and add it again — pnpm will not
+re-resolve a git HEAD while the spec is unchanged:
+
+```bash
+dsh plugin --profile web remove dsh-token-stats
+dsh plugin --profile web add github:mathangler/dsh-token-stats
+```
+
+On restricted networks `github.com` itself may be unreachable while **installs
+still work**: pnpm fetches the tarball from `codeload.github.com`, a different
+host.
 
 ## Where the numbers come from
 

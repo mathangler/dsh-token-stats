@@ -10,8 +10,8 @@ the numbers you would otherwise have to guess at.
 | Block | What it is |
 |---|---|
 | Dashboard | Six figures: lifetime tokens, peak day (with its date), today, last 7 days, daily average (per active day), and the cache-read share of all tokens |
-| Daily | A GitHub-style contribution heatmap. The window follows the card width (~9 months on a typical card, up to a full year), always ends today, and fills the card. Colour depth is continuous (see below). Days that have not happened yet keep a dashed slot |
-| Weekly | One bar per week over the **same window** as the daily grid and aligned column-for-column, so switching views never shifts the data |
+| Daily | A GitHub-style contribution heatmap. One block, always ending today: the window follows the card width but stays between a quarter and half a year (24 weeks at a typical ~820px card), which keeps each day at a readable ~30px square — a year-long grid squeezed them to ~19px and spent most of its width on months nobody asks about any more. Colour depth is continuous (see below). Days that have not happened yet keep a dashed slot |
+| Weekly | One bar per week over the **same block**: same window, same column pitch, same width and height, aligned column-for-column, so switching views never shifts the data |
 | Trend | One smooth line per model over the selected range. The axis granularity follows the range: day up to a month, week up to six months, month up to two years, year beyond |
 | Share | A ring chart of per-model usage in the selected range, with a named legend and the range total in the middle |
 
@@ -158,7 +158,9 @@ a bounded schedule (0.7s, growing to one request every 2.5s, twelve in all, abou
 
 The panel also measures its chart slot once, before the browser paints it, and
 remembers that width across mounts, so switching between the daily and weekly view
-never re-measures from zero or moves the sections below it.
+never re-measures from zero or moves the sections below it. Both views are built
+from one geometry — the same week count, column pitch, width and height — and the
+slot reserves exactly that block.
 
 The host also runs exactly one warm-up scan, ten seconds after boot and clear of
 the first paint. There is no polling and no interval.

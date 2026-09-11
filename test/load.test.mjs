@@ -534,21 +534,31 @@ test('the trend granularity follows the range', () => {
   assert.ok(__test.tickIndices(53, 6).length <= 6);
 });
 
-test('the heatmap column count trades window length for block size', () => {
+test('the heatmap window is a quarter to half a year of legible blocks', () => {
   const { __test } = loadClient().mod;
-  // The whole point: a narrow card shows fewer weeks so each block stays
-  // legible, instead of squeezing 53 columns into ~10px blocks.
-  assert.ok(__test.heatmapWeeks(1600) === 53, 'a very wide card shows the full year');
-  assert.ok(__test.heatmapWeeks(820) >= 30 && __test.heatmapWeeks(820) <= 40, 'a typical card shows ~9 months');
-  assert.ok(__test.heatmapWeeks(500) < __test.heatmapWeeks(820), 'narrower cards show fewer weeks');
+  // The window follows the card so the blocks stay one readable size, but it is
+  // bounded by what is worth reading: a year-long grid squeezed each block to
+  // ~19px and spent most of its width on months nobody asks about any more.
+  const typical = __test.gridGeometry(820);
+  assert.ok(typical.weeks >= 20 && typical.weeks <= 26, 'a typical card shows about half a year, saw ' + typical.weeks);
+  assert.ok(typical.cell >= 26, 'the blocks must be legible, saw ' + typical.cell.toFixed(1) + 'px');
+  assert.equal(__test.heatmapWeeks(1600), 26, 'a very wide card stops at half a year instead of stretching to a year');
   assert.equal(__test.heatmapWeeks(120), 12, 'the window floor keeps a narrow card readable');
   assert.equal(__test.heatmapWeeks(0), __test.heatmapWeeks(820), 'an unmeasured grid assumes a typical card');
-  // Cell pitch stays in a legible band across every realistic width.
-  for (const width of [300, 500, 700, 820, 1000, 1400]) {
-    const weeks = __test.heatmapWeeks(width);
-    const cell = (width - 16 - (weeks - 1) * 3) / weeks;
-    assert.ok(cell >= 8 && cell <= 40, 'cell pitch ' + cell.toFixed(1) + 'px at ' + width + 'px is out of band');
+  assert.ok(__test.heatmapWeeks(500) < __test.heatmapWeeks(820), 'narrower cards show fewer weeks');
+  // Every realistic width stays in one legible band and inside its card, and the
+  // block never grows taller than the block a wider card would have drawn.
+  let previousHeight = 0;
+  for (const width of [300, 500, 700, 820, 1000, 1400, 2000]) {
+    const geometry = __test.gridGeometry(width);
+    assert.ok(geometry.weeks >= 12 && geometry.weeks <= 26, 'window out of range at ' + width + ': ' + geometry.weeks);
+    assert.ok(geometry.cell >= 18 && geometry.cell <= 34, 'block width out of band at ' + width + ': ' + geometry.cell.toFixed(1));
+    assert.ok(geometry.gridWidth <= width + 0.5, 'the block overflows a ' + width + 'px card: ' + geometry.gridWidth.toFixed(1));
+    assert.ok(geometry.height <= 274, 'the block must not keep growing with the card, saw ' + geometry.height.toFixed(1));
+    previousHeight = geometry.height;
   }
+  assert.ok(previousHeight > 170, 'the blocks are the point: the block is taller than the old yearly grid');
+  assert.ok(__test.gridGeometry(820).cell > 26, 'the squares must be visibly bigger than the old year-long grid');
 });
 
 /**
@@ -590,35 +600,83 @@ test('the day-scale views share one measured slot that reserves their height', (
   assert.equal(daily.length, 1, 'the daily grid is the default view');
   assert.equal(daily[0].props.width, 560, 'the view must be handed the slot\u2019s shared measurement');
 
-  // The reserved height always covers the weekly chart, whose SVG is 170px
-  // tall, so swapping views cannot move the sections below the slot.
+  // Both views are built from one geometry, so the reserved height is exactly
+  // the block they draw: swapping them cannot move anything below the slot, and
+  // there is no slack in the reservation either.
   for (const width of [0, 300, 560, 820, 1184, 1600]) {
-    assert.ok(__test.viewSlotHeight(width) >= 170, 'the slot is shorter than the weekly chart at ' + width + 'px');
+    const geometry = __test.gridGeometry(width);
+    assert.equal(__test.viewSlotHeight(width), Math.round(geometry.height), 'the slot must be the block its views draw at ' + width + 'px');
+    assert.ok(geometry.height > 170, 'the block must be taller than the old fixed-height weekly chart at ' + width + 'px');
   }
-  // A typical settings card: both views measure ~170px, so the reservation is
-  // the truthful height rather than slack.
-  assert.equal(__test.viewSlotHeight(0), 170);
-  assert.equal(__test.viewSlotHeight(820), 170);
-  assert.ok(__test.viewSlotHeight(1600) > 170, 'a very wide card grows the square cells and must reserve for them');
+  assert.ok(__test.viewSlotHeight(820) > 200, 'a typical card reserves the taller grid, saw ' + __test.viewSlotHeight(820));
 });
 
 test('the two day-scale views derive one window from a passed width', () => {
   const { __test } = loadClient().mod;
   const t = (key) => (__test.ZH[key] === undefined ? key : __test.ZH[key]);
   const model = __test.prepare({ generatedAt: 0, scope: {}, models: [], days: [], range: { first: null, last: null } });
-  const countOf = (node, name, seen = []) => {
-    if (node === null || node === undefined || typeof node !== 'object') return seen;
-    if (Array.isArray(node)) { for (const child of node) countOf(child, name, seen); return seen; }
-    if (node.type === name) seen.push(node);
-    countOf(node.children, name, seen);
-    return seen;
+  const collect = (node, out = []) => {
+    if (node === null || node === undefined || typeof node !== 'object') return out;
+    if (Array.isArray(node)) { for (const child of node) collect(child, out); return out; }
+    out.push(node);
+    collect(node.children, out);
+    return out;
   };
-  for (const width of [420, 560, 900]) {
-    const weeks = __test.heatmapWeeks(width);
-    const cells = countOf(__test.components.Heatmap({ t, model, metric: 'all', width }), 'div').filter((node) => typeof node.props.className === 'string' && node.props.className.split(' ').includes('dts-cell'));
-    const bars = countOf(__test.components.WeeklyBars({ t, model, metric: 'all', width }), 'rect');
-    assert.equal(cells.length, weeks * 7, 'the daily grid must use the passed width at ' + width + 'px');
-    assert.equal(bars.length, weeks * 2, 'the weekly view must use the same window at ' + width + 'px');
+  const countOf = (node, name) => collect(node).filter((entry) => entry.type === name).length;
+  const withClass = (node, name) => collect(node).filter((entry) => typeof entry.props.className === 'string' && entry.props.className.split(' ').includes(name));
+  const isCell = (node) => typeof node.props.className === 'string' && node.props.className.split(' ').includes('dts-cell');
+
+  for (const width of [420, 560, 900, 1400]) {
+    const geometry = __test.gridGeometry(width);
+    const heatTree = __test.components.Heatmap({ t, model, metric: 'all', width });
+    const barTree = __test.components.WeeklyBars({ t, model, metric: 'all', width });
+    const cells = collect(heatTree).filter(isCell);
+    assert.equal(cells.length, geometry.weeks * 7, 'the daily grid must use the passed width at ' + width + 'px');
+    assert.equal(countOf(barTree, 'rect'), geometry.weeks * 2, 'the weekly view must use the same window at ' + width + 'px');
+    // The two views are one block: same explicit width, and the bars' viewBox is
+    // the grid's own rectangle with a 1:1 scale, so their columns line up.
+    const block = withClass(heatTree, 'dts-heat');
+    assert.equal(block.length, 1, 'the daily grid must be one explicitly sized block');
+    assert.equal(block[0].props.style.width, geometry.gridWidth + 'px', 'the grid block must be the computed width');
+    assert.equal(withClass(heatTree, 'dts-heat-center').length, 1, 'the grid block must be centred in the slot');
+    const svg = collect(barTree).filter((entry) => entry.type === 'svg')[0];
+    assert.equal(svg.props.viewBox, '0 0 ' + geometry.gridWidth + ' ' + geometry.height, 'the bars must occupy the same rectangle as the grid');
+    assert.equal(svg.props.style.width, geometry.gridWidth + 'px', 'the bars must not be stretched to the card width');
+    assert.equal(withClass(barTree, 'dts-heat-center').length, 1, 'the bar block must be centred in the slot');
+  }
+});
+
+/**
+ * The two views were measured against each other in a real browser once, and
+ * their columns matched exactly; this pins the geometry they were measured from,
+ * because a one-gap error in the first column is invisible in a unit test but
+ * obvious on screen as a week sitting a few pixels left of its own days.
+ */
+test('a week sits exactly under its seven days', () => {
+  const { __test } = loadClient().mod;
+  const t = (key) => (__test.ZH[key] === undefined ? key : __test.ZH[key]);
+  const model = __test.prepare({ generatedAt: 0, scope: {}, models: [], days: [], range: { first: null, last: null } });
+  const collect = (node, out = []) => {
+    if (node === null || node === undefined || typeof node !== 'object') return out;
+    if (Array.isArray(node)) { for (const child of node) collect(child, out); return out; }
+    out.push(node);
+    collect(node.children, out);
+    return out;
+  };
+  for (const width of [420, 560, 820, 1184]) {
+    const geometry = __test.gridGeometry(width);
+    // The stylesheet lays the grid out as `gutter | column × weeks` with one gap
+    // between every pair, so the block's width has to be exactly that sum.
+    const sum = geometry.gutter + geometry.gap * geometry.weeks + geometry.weeks * geometry.cell;
+    assert.ok(Math.abs(geometry.gridWidth - sum) < 1e-6, 'the block must be the width the grid lays out at ' + width + 'px');
+    const bars = collect(__test.components.WeeklyBars({ t, model, metric: 'all', width }))
+      .filter((node) => typeof node.props.className === 'string' && node.props.className.split(' ').includes('dts-week-bar'));
+    assert.equal(bars.length, geometry.weeks, 'one bar per week at ' + width + 'px');
+    assert.equal(bars[0].props.x, geometry.gutter + geometry.gap, 'the first bar must start where the first grid column starts');
+    assert.equal(bars[0].props.width, geometry.cell, 'a bar must be exactly as wide as a day square');
+    for (let i = 1; i < bars.length; i += 1) {
+      assert.ok(Math.abs((bars[i].props.x - bars[i - 1].props.x) - geometry.pitch) < 1e-9, 'every bar must keep the grid pitch');
+    }
   }
 });
 

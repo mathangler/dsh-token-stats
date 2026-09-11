@@ -551,6 +551,94 @@ test('the heatmap column count trades window length for block size', () => {
   }
 });
 
+/**
+ * Both perceived waits this round is about came from the same place: the panel
+ * used to restart from zero width and from a stale aggregate on every mount.
+ * These two tests pin the width half — the slot reserves a stable height and a
+ * remount begins from the last real measurement instead of the 820px fallback.
+ */
+test('the day-scale views share one measured slot that reserves their height', () => {
+  const { __test } = loadClient().mod;
+  const t = (key) => (__test.ZH[key] === undefined ? key : __test.ZH[key]);
+  const payload = {
+    generatedAt: 0,
+    scope: { sessions: 1, failed: 0, retired: 0, seeded: 0 },
+    models: [{ key: 'p/a', provider: 'p', model: 'a', name: 'Alpha', buckets: [10, 2, 30, 0] }],
+    days: [{ d: '2026-09-05', b: [10, 2, 30, 0], m: [[0, 10, 2, 30, 0]] }],
+    range: { first: '2026-09-05', last: '2026-09-05' },
+  };
+  __test.seedPayload(payload);
+  // What a second mount of the panel sees: the width the last one measured.
+  __test.seedMeasuredWidth(560);
+  const Panel = __test.createPanel({}, { translate: t, subscribeLocale: () => () => {} });
+  const tree = Panel();
+
+  const all = [];
+  const walk = (node) => {
+    if (node === null || node === undefined || typeof node !== 'object') return;
+    if (Array.isArray(node)) { for (const child of node) walk(child); return; }
+    all.push(node);
+    walk(node.children);
+  };
+  walk(tree);
+
+  const slot = all.filter((node) => node.props && node.props.className === 'dts-viewslot');
+  assert.equal(slot.length, 1, 'both day-scale views must share exactly one slot');
+  assert.equal(slot[0].props.style.minHeight, __test.viewSlotHeight(560) + 'px', 'the slot height must follow the remembered width');
+  assert.equal(__test.measuredWidth(), 560, 'rendering must not reset the remembered width');
+  const daily = all.filter((node) => node.type === __test.components.Heatmap);
+  assert.equal(daily.length, 1, 'the daily grid is the default view');
+  assert.equal(daily[0].props.width, 560, 'the view must be handed the slot\u2019s shared measurement');
+
+  // The reserved height always covers the weekly chart, whose SVG is 170px
+  // tall, so swapping views cannot move the sections below the slot.
+  for (const width of [0, 300, 560, 820, 1184, 1600]) {
+    assert.ok(__test.viewSlotHeight(width) >= 170, 'the slot is shorter than the weekly chart at ' + width + 'px');
+  }
+  // A typical settings card: both views measure ~170px, so the reservation is
+  // the truthful height rather than slack.
+  assert.equal(__test.viewSlotHeight(0), 170);
+  assert.equal(__test.viewSlotHeight(820), 170);
+  assert.ok(__test.viewSlotHeight(1600) > 170, 'a very wide card grows the square cells and must reserve for them');
+});
+
+test('the two day-scale views derive one window from a passed width', () => {
+  const { __test } = loadClient().mod;
+  const t = (key) => (__test.ZH[key] === undefined ? key : __test.ZH[key]);
+  const model = __test.prepare({ generatedAt: 0, scope: {}, models: [], days: [], range: { first: null, last: null } });
+  const countOf = (node, name, seen = []) => {
+    if (node === null || node === undefined || typeof node !== 'object') return seen;
+    if (Array.isArray(node)) { for (const child of node) countOf(child, name, seen); return seen; }
+    if (node.type === name) seen.push(node);
+    countOf(node.children, name, seen);
+    return seen;
+  };
+  for (const width of [420, 560, 900]) {
+    const weeks = __test.heatmapWeeks(width);
+    const cells = countOf(__test.components.Heatmap({ t, model, metric: 'all', width }), 'div').filter((node) => typeof node.props.className === 'string' && node.props.className.split(' ').includes('dts-cell'));
+    const bars = countOf(__test.components.WeeklyBars({ t, model, metric: 'all', width }), 'rect');
+    assert.equal(cells.length, weeks * 7, 'the daily grid must use the passed width at ' + width + 'px');
+    assert.equal(bars.length, weeks * 2, 'the weekly view must use the same window at ' + width + 'px');
+  }
+});
+
+/**
+ * The other half of the perceived wait: the host answers a cached aggregate at
+ * once and rescans behind the response, so the panel has to follow up. These
+ * pin the follow-up decision, including its bound.
+ */
+test('a stale answer is followed up a bounded number of times', () => {
+  const { __test } = loadClient().mod;
+  const last = __test.STALE_MAX_TRIES;
+  assert.ok(last >= 3, 'the follow-ups must cover a multi-second rescan, saw ' + last);
+  assert.equal(__test.staleFollowUp({ stale: true, days: [] }, 0), true, 'a stale answer needs another request');
+  assert.equal(__test.staleFollowUp({ stale: true, days: [] }, last - 1), true, 'the retries are not cut short');
+  assert.equal(__test.staleFollowUp({ stale: true, days: [] }, last), false, 'the follow-ups must stop');
+  assert.equal(__test.staleFollowUp({ stale: false, days: [] }, 0), false, 'a fresh answer is final');
+  assert.equal(__test.staleFollowUp({ ok: false, error: 'boom' }, 0), false, 'a failure is not retried into a poll');
+  assert.equal(__test.staleFollowUp(null, 0), false, 'a missing value must not schedule anything');
+});
+
 test('the ring path closes an annulus', () => {
   const { __test } = loadClient().mod;
   assert.equal(__test.ringPath(50, 50, 40, 24, 0, Math.PI * 2), null, 'a full circle is drawn as a stroked circle instead');

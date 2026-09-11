@@ -364,19 +364,75 @@ test('the aggregate is served from cache inside the TTL and refreshed past it', 
   const handlers = createHandlers({ get: () => undefined }, { sessionQuery: query, cachePath: null, aggregateTtlMs: 60000 });
   const first = await handlers.summary({});
   const second = await handlers.summary({});
-  assert.equal(first, second, 'inside the TTL the same value is returned without a scan');
+  assert.equal(second.stale, false);
   assert.equal(query.listings.length, 1, 'no second listing inside the TTL');
   const forced = await handlers.refresh({});
-  assert.notEqual(forced, first, 'refresh always rescans');
-  assert.equal(query.listings.length, 2);
+  // Counted rather than compared by timestamp: two in-memory scans can land in
+  // the same millisecond.
+  assert.equal(query.listings.length, 2, 'refresh always rescans');
+  assert.equal(forced.stale, false);
+});
+
+test('a stale aggregate is answered at once and refreshed behind the response', async () => {
+  const session = { header: { id: 's1', isSeeded: false }, inheritedEventCount: 0, events: sessionEvents('m', usage(4, 2, 0, 0), 1789000000000) };
+  const query = stubQuery([session]);
+  // TTL 0 makes every later read stale.
+  const handlers = createHandlers({ get: () => undefined }, { sessionQuery: query, cachePath: null, aggregateTtlMs: 0 });
+  const cold = await handlers.summary({});
+  assert.equal(cold.stale, false, 'the first ever answer has to wait for a scan');
+  assert.deepEqual(cold.models[0].buckets, [4, 2, 0, 0]);
+
+  session.events = session.events.concat([
+    { type: 'turn/start', time: 1789000001000, data: { turn: 2 } },
+    { type: 'step/start', time: 1789000001000, data: { step: 1 } },
+    assistant(1789000001000, 2, 1, 'prov', 'm', usage(6, 3, 0, 0)),
+  ]);
+
+  const listingsBefore = query.listings.length;
+  const started = Date.now();
+  const stale = await handlers.summary({});
+  const elapsed = Date.now() - started;
+  // Regression: this call used to block on a full rescan, which re-reads the
+  // live session's whole log — 1-2s on a real machine, paid on every panel open.
+  assert.equal(stale.stale, true, 'an expired aggregate must be flagged, not silently waited on');
+  assert.deepEqual(stale.models[0].buckets, [4, 2, 0, 0], 'the stale answer is the previous scan');
+  assert.ok(elapsed < 50, 'the stale answer must not wait for the rescan, took ' + elapsed + 'ms');
+  assert.equal(query.listings.length, listingsBefore, 'the rescan must run off the response path');
+
+  for (let i = 0; i < 40 && query.reads.length < 2; i += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+  const settled = await handlers.summary({});
+  assert.deepEqual(settled.models[0].buckets, [10, 5, 0, 0], 'the background scan replaced the stale answer');
+});
+
+test('the persisted aggregate lets a cold host answer without scanning', async () => {
+  const { mkdtemp, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-token-stats-test-'));
+  const cachePath = join(dir, 'rollup.json');
+  try {
+    const session = { header: { id: 's1', isSeeded: false }, inheritedEventCount: 0, events: sessionEvents('m', usage(4, 2, 0, 0), 1789000000000) };
+    const first = createHandlers({ get: () => undefined }, { sessionQuery: stubQuery([session]), cachePath, aggregateTtlMs: 60000 });
+    await first.summary({});
+
+    // A brand-new handler stands in for a restarted web process.
+    const coldQuery = stubQuery([session]);
+    const second = createHandlers({ get: () => undefined }, { sessionQuery: coldQuery, cachePath, aggregateTtlMs: 60000 });
+    const restored = await second.summary({});
+    assert.equal(restored.stale, false, 'a restored aggregate is inside its TTL');
+    assert.deepEqual(restored.models[0].buckets, [4, 2, 0, 0]);
+    assert.deepEqual(coldQuery.reads, [], 'nothing had to be read to answer');
+    assert.deepEqual(coldQuery.listings, [], 'not even a listing');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test('concurrent callers share one scan', async () => {
   const query = stubQuery([{ header: { id: 's1', isSeeded: false }, inheritedEventCount: 0, events: sessionEvents('m', usage(4, 2, 0, 0), 1789000000000) }]);
   const handlers = createHandlers({ get: () => undefined }, { sessionQuery: query, cachePath: null, aggregateTtlMs: 0 });
   const [a, b, c] = await Promise.all([handlers.summary({}), handlers.summary({}), handlers.summary({})]);
-  assert.equal(a, b);
-  assert.equal(b, c);
+  assert.equal(a.generatedAt, b.generatedAt);
+  assert.equal(b.generatedAt, c.generatedAt);
   assert.equal(query.listings.length, 1, 'three panels opening at once must cost one scan');
 });
 
@@ -391,7 +447,9 @@ test('a persistent rollup is written and reused across handler instances', async
     await first.summary({});
     const secondQuery = stubQuery([session]);
     const second = createHandlers({ get: () => undefined }, { sessionQuery: secondQuery, cachePath, aggregateTtlMs: 0 });
-    const payload = await second.summary({});
+    // Force a scan: a plain summary now answers from the restored aggregate, so
+    // only an explicit rescan proves the per-session rollup itself survived.
+    const payload = await second.refresh({});
     assert.deepEqual(secondQuery.reads, [], 'a warm rollup survives a handler restart');
     assert.equal(payload.scope.reused, 1);
     assert.deepEqual(payload.models[0].buckets, [4, 2, 0, 0]);

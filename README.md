@@ -138,9 +138,20 @@ Four things keep a scan cheap, each measured on a 22-session machine:
   provider.
 * **The browser paints the last answer immediately** and revalidates behind it, so
   re-entering Settings never shows a loading state for numbers it already has.
+* **The last aggregate is persisted alongside the rollup**, so even the first panel
+  open after a host restart is answered from disk rather than waiting for a scan.
 
-Together these took a warm scan from about 3.0s to about 0.2s, with the aggregate
-served from a 60-second cache in between; an explicit refresh always rescans.
+Together these took a warm scan from about 3.0s to about 0.2s. A panel open is now
+answered at once from one of three places: the 60-second aggregate cache, the
+persisted aggregate, or — when even that is past its budget — a `stale: true`
+answer that is refreshed *behind* the response while the panel revalidates a few
+times and shows a quiet "Refreshing…" hint. On the machine this was built against,
+the first open after a restart answered in 75ms while the same data took 9.3s to
+rescan. An explicit refresh still rescans synchronously.
+
+The panel also measures its chart slot once, before the browser paints it, and
+remembers that width across mounts, so switching between the daily and weekly view
+never re-measures from zero or moves the sections below it.
 
 The host also runs exactly one warm-up scan, ten seconds after boot and clear of
 the first paint. There is no polling and no interval.

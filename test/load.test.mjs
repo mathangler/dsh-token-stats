@@ -534,29 +534,34 @@ test('the trend granularity follows the range', () => {
   assert.ok(__test.tickIndices(53, 6).length <= 6);
 });
 
-test('the day-scale window is a fixed sixteen weeks', () => {
+test('the day-scale window is a fixed eighteen weeks', () => {
   const { __test } = loadClient().mod;
-  // Sixteen weeks is the whole question this panel answers, and a fixed column
-  // count is what keeps the block one shape: deriving the window from the card
-  // made it grow on a wide screen and shrink every square on a narrow one.
-  assert.equal(__test.heatmapWeeks(), 16, 'the window is a quarter of a year, whatever the card is');
-  const typical = __test.gridGeometry(530);
-  assert.equal(typical.weeks, 16);
-  assert.equal(typical.cell, 26, 'a typical card gets the fixed cell size, saw ' + typical.cell);
-  assert.ok(typical.gridWidth < 500, 'the block is a compact shape, not the full card width, saw ' + typical.gridWidth.toFixed(1));
-  assert.ok(typical.gridWidth < 530, 'so it is centred in the slot rather than stretched across it');
-  // Only a card too narrow for the block shrinks the cell, and the block still
-  // never overflows its card.
-  for (const width of [1400, 1000, 820, 600, 530, 500, 420, 300]) {
+  // The window is the whole question this panel answers, and a fixed column count
+  // is what keeps the block one shape: deriving it from the card made the block
+  // grow on a wide screen and shrink every square on a narrow one.
+  assert.equal(__test.heatmapWeeks(), 18, 'the window is fixed, whatever the card is');
+  const roomy = __test.gridGeometry(560);
+  assert.equal(roomy.weeks, 18);
+  assert.equal(roomy.cell, 26, 'a roomy card gets the fixed cell size, saw ' + roomy.cell);
+  // A narrower card than the fixed block shrinks the cells just enough to hold
+  // all eighteen columns, and the block still never overflows its slot.
+  const tight = __test.gridGeometry(530);
+  assert.equal(tight.weeks, 18, 'the window does not shrink with the card');
+  assert.ok(tight.cell < 26 && tight.cell > 24, 'a 530px dialog shaves the cell, saw ' + tight.cell);
+  for (const width of [1400, 1000, 820, 600, 560, 530, 420, 300]) {
     const geometry = __test.gridGeometry(width);
-    assert.equal(geometry.weeks, 16, 'the window never follows the card, at ' + width + 'px');
+    assert.equal(geometry.weeks, 18, 'the window never follows the card, at ' + width + 'px');
     assert.ok(geometry.cell <= 26, 'the cell must not exceed the fixed size at ' + width + 'px: ' + geometry.cell);
-    assert.ok(geometry.cell >= 10, 'the cell must stay readable at ' + width + 'px: ' + geometry.cell);
+    assert.ok(geometry.cell >= 6, 'the cell must stay drawable at ' + width + 'px: ' + geometry.cell);
     assert.ok(geometry.gridWidth <= width + 0.5, 'the block overflows a ' + width + 'px card: ' + geometry.gridWidth.toFixed(1));
+    if (width >= 560) {
+      assert.equal(geometry.height, roomy.height, 'the block keeps one height from a roomy card up, at ' + width + 'px');
+    } else {
+      assert.ok(geometry.height <= roomy.height, 'a shaved block can only get shorter, at ' + width + 'px');
+    }
   }
   assert.ok(__test.gridGeometry(300).cell < __test.gridGeometry(530).cell, 'a narrow card shrinks the cell instead of overflowing');
   assert.equal(__test.gridGeometry(0).cell, 26, 'an unmeasured card assumes a typical one');
-  assert.ok(__test.gridGeometry(530).cell > 20, 'the squares must stay visibly bigger than the old year-long grid');
 });
 
 /**
@@ -670,11 +675,12 @@ test('the day-scale views share one measured slot that reserves their height', (
     const geometry = __test.gridGeometry(width);
     assert.equal(__test.viewSlotHeight(width), Math.round(geometry.height), 'the slot must be the block its views draw at ' + width + 'px');
   }
-  // The block has one size from a typical card upwards, so a wide dialog does
-  // not grow it: that was the "block is a bit too big" complaint.
-  assert.equal(__test.viewSlotHeight(530), __test.viewSlotHeight(1600), 'the block must not grow with the card');
-  assert.ok(__test.viewSlotHeight(530) < 230, 'a typical card keeps the block compact, saw ' + __test.viewSlotHeight(530));
-  assert.ok(__test.viewSlotHeight(300) < __test.viewSlotHeight(530), 'only a narrow card shrinks it');
+  // The block has one size from a roomy card upwards, so a wide dialog does not
+  // grow it: that was the "block is a bit too big" complaint. A card narrower
+  // than the fixed block shaves the cells instead.
+  assert.equal(__test.viewSlotHeight(560), __test.viewSlotHeight(1600), 'the block must not grow with the card');
+  assert.ok(__test.viewSlotHeight(560) < 230, 'the block stays compact, saw ' + __test.viewSlotHeight(560));
+  assert.ok(__test.viewSlotHeight(300) < __test.viewSlotHeight(560), 'only a narrow card shrinks it');
 });
 
 test('the two day-scale views derive one window from a passed width', () => {

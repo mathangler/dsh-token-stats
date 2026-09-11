@@ -156,11 +156,11 @@ pass re-reads the live session's whole log; the panel follows a stale answer up 
 a bounded schedule (0.7s, growing to one request every 2.5s, twelve in all, about
 28s of coverage). An explicit refresh still rescans synchronously.
 
-The panel also measures its chart slot once, before the browser paints it, and
-remembers that width across mounts, so switching between the daily and weekly view
-never re-measures from zero or moves the sections below it. Both views are built
-from one geometry — the same week count, column pitch, width and height — and the
-slot reserves exactly that block.
+The panel measures its chart slot from the ref callback that attaches it — not
+from an effect, because on a cold open the slot does not exist yet when effects
+run — and remembers that width across mounts. Both views are built from one
+geometry — the same week count, column pitch, width and height — and the slot
+reserves exactly that block, and only once a width has actually been measured.
 
 The host also runs exactly one warm-up scan, ten seconds after boot and clear of
 the first paint. There is no polling and no interval.

@@ -562,6 +562,71 @@ test('the heatmap window is a quarter to half a year of legible blocks', () => {
 });
 
 /**
+ * The cold-open bug, pinned from the two sides it actually failed on.
+ *
+ * The panel measures its slot with a callback ref, because the slot only exists
+ * once an answer has rendered: on a cold open an effect keyed on nothing ran
+ * while the ref was still null, the panel kept the 820px fallback geometry inside
+ * a 530px dialog, and the user saw 18px squares with 85px of dead space under
+ * them plus a weekly chart drawn off the right edge of the card. Both halves are
+ * asserted here so neither can come back silently.
+ */
+test('an unmeasured panel reserves no height and never overflows its slot', () => {
+  const { __test } = loadClient().mod;
+  const t = (key) => (__test.ZH[key] === undefined ? key : __test.ZH[key]);
+  const payload = {
+    generatedAt: 0,
+    scope: { sessions: 1, failed: 0, retired: 0, seeded: 0 },
+    models: [{ key: 'p/a', provider: 'p', model: 'a', name: 'Alpha', buckets: [10, 2, 30, 0] }],
+    days: [{ d: '2026-09-05', b: [10, 2, 30, 0], m: [[0, 10, 2, 30, 0]] }],
+    range: { first: '2026-09-05', last: '2026-09-05' },
+  };
+  __test.seedPayload(payload);
+  const Panel = __test.createPanel({}, { translate: t, subscribeLocale: () => () => {} });
+
+  const slotOf = () => {
+    const found = [];
+    const walk = (node) => {
+      if (node === null || node === undefined || typeof node !== 'object') return;
+      if (Array.isArray(node)) { for (const child of node) walk(child); return; }
+      if (node.props && node.props.className === 'dts-viewslot') found.push(node);
+      walk(node.children);
+    };
+    walk(Panel());
+    return found[0];
+  };
+
+  // Cold open: nothing measured yet, so nothing may be reserved. A reservation
+  // derived from the fallback is exactly what left the dead space.
+  __test.seedMeasuredWidth(0);
+  assert.equal(slotOf().props.style, undefined, 'an unmeasured slot must not reserve a fallback height');
+  // Once measured, the reservation is stated and it is the block's own height.
+  __test.seedMeasuredWidth(530);
+  assert.equal(slotOf().props.style.minHeight, __test.viewSlotHeight(530) + 'px');
+
+  // The weekly chart is as wide as its slot when measured, and stretches to it
+  // (rather than overflowing) when it is not.
+  const model = __test.prepare(payload);
+  const svgOf = (width) => {
+    const found = [];
+    const walk = (node) => {
+      if (node === null || node === undefined || typeof node !== 'object') return;
+      if (Array.isArray(node)) { for (const child of node) walk(child); return; }
+      if (node.type === 'svg') found.push(node);
+      walk(node.children);
+    };
+    walk(__test.components.WeeklyBars({ t, model, metric: 'all', width }));
+    return found[0];
+  };
+  assert.equal(svgOf(0).props.style.width, '100%', 'an unmeasured chart must stay inside its slot');
+  for (const width of [530, 820, 1184]) {
+    const geometry = __test.gridGeometry(width);
+    assert.equal(svgOf(width).props.style.width, geometry.gridWidth + 'px');
+    assert.ok(geometry.gridWidth <= width + 0.5, 'the chart must not be laid out wider than its slot at ' + width + 'px');
+  }
+});
+
+/**
  * Both perceived waits this round is about came from the same place: the panel
  * used to restart from zero width and from a stale aggregate on every mount.
  * These two tests pin the width half — the slot reserves a stable height and a

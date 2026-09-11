@@ -144,10 +144,12 @@ Four things keep a scan cheap, each measured on a 22-session machine:
 Together these took a warm scan from about 3.0s to about 0.2s. A panel open is now
 answered at once from one of three places: the 60-second aggregate cache, the
 persisted aggregate, or — when even that is past its budget — a `stale: true`
-answer that is refreshed *behind* the response while the panel revalidates a few
-times and shows a quiet "Refreshing…" hint. On the machine this was built against,
-the first open after a restart answered in 75ms while the same data took 9.3s to
-rescan. An explicit refresh still rescans synchronously.
+answer that is refreshed *behind* the response while the panel revalidates and
+shows a quiet "Refreshing…" hint. On the machine this was built against, an open
+answered in 66–83ms while the same data took up to 27.5s to rescan, because that
+pass re-reads the live session's whole log; the panel follows a stale answer up on
+a bounded schedule (0.7s, growing to one request every 2.5s, twelve in all, about
+28s of coverage). An explicit refresh still rescans synchronously.
 
 The panel also measures its chart slot once, before the browser paints it, and
 remembers that width across mounts, so switching between the daily and weekly view

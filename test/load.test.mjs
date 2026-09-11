@@ -637,6 +637,16 @@ test('a stale answer is followed up a bounded number of times', () => {
   assert.equal(__test.staleFollowUp({ stale: false, days: [] }, 0), false, 'a fresh answer is final');
   assert.equal(__test.staleFollowUp({ ok: false, error: 'boom' }, 0), false, 'a failure is not retried into a poll');
   assert.equal(__test.staleFollowUp(null, 0), false, 'a missing value must not schedule anything');
+  // The schedule has to start quickly and still cover a long rescan: the first
+  // open after a boot measured 27.5s of rescanning behind an already-painted
+  // answer, so the total covered wait is asserted, not just the count.
+  const waits = [];
+  for (let i = 0; i < last; i += 1) waits.push(__test.staleRetryDelay(i));
+  assert.equal(waits[0], 700, 'the first follow-up must be quick, saw ' + waits[0]);
+  assert.ok(waits.every((wait, i) => i === 0 || wait >= waits[i - 1]), 'the schedule must not speed up: ' + waits.join(','));
+  assert.ok(waits[waits.length - 1] <= 2500, 'the cadence must ease off, saw ' + waits[waits.length - 1]);
+  const covered = waits.reduce((a, b) => a + b, 0);
+  assert.ok(covered >= 25000, 'the follow-ups must cover the slowest measured rescan, saw ' + covered + 'ms');
 });
 
 test('the ring path closes an annulus', () => {

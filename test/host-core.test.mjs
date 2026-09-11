@@ -303,21 +303,27 @@ test('a scan yields the loop between sessions', async () => {
     { header: { id: 'b', isSeeded: false }, inheritedEventCount: 0, events: sessionEvents('m', usage(6, 3, 0, 0), 1789000001000) },
   ];
   const query = stubQuery(sessions);
-  const timerRan = { value: false, atRead: [] };
-  setTimeout(() => { timerRan.value = true; }, 0);
+  const turned = { value: false, atRead: [] };
+  // Queued before the scan, so it sits ahead of the scan's own yield in the
+  // check phase. The fake queries below resolve on microtasks, and microtasks
+  // never reach the check phase, so this stays false for the whole scan unless
+  // the scan hands the loop back itself.
+  setImmediate(() => { turned.value = true; });
   const original = query.readSession;
   query.readSession = async (id) => {
-    timerRan.atRead.push(timerRan.value);
+    turned.atRead.push(turned.value);
     return original(id);
   };
 
   const handlers = createHandlers({ get: () => undefined }, { sessionQuery: query, cachePath: null, aggregateTtlMs: 0 });
   const payload = await handlers.summary({});
   assert.equal(payload.scope.sessions, 2);
-  assert.deepEqual(timerRan.atRead, [false, true], 'the second session must be folded only after a macrotask turn');
+  assert.equal(turned.atRead.length, 2, 'both sessions must have been read');
+  assert.deepEqual(turned.atRead, [true, true], 'every session must be folded only after a macrotask turn');
 });
 
-test('a grown log is re-read and replaces its own buckets', async () => {  const session = { header: { id: 's1', isSeeded: false }, inheritedEventCount: 0, events: sessionEvents('m', usage(4, 2, 0, 0), 1789000000000) };
+test('a grown log is re-read and replaces its own buckets', async () => {
+  const session = { header: { id: 's1', isSeeded: false }, inheritedEventCount: 0, events: sessionEvents('m', usage(4, 2, 0, 0), 1789000000000) };
   const query = stubQuery([session]);
   const handlers = createHandlers({ get: () => undefined }, { sessionQuery: query, cachePath: null, aggregateTtlMs: 0 });
   await handlers.summary({});

@@ -534,31 +534,29 @@ test('the trend granularity follows the range', () => {
   assert.ok(__test.tickIndices(53, 6).length <= 6);
 });
 
-test('the heatmap window is a quarter to half a year of legible blocks', () => {
+test('the day-scale window is a fixed sixteen weeks', () => {
   const { __test } = loadClient().mod;
-  // The window follows the card so the blocks stay one readable size, but it is
-  // bounded by what is worth reading: a year-long grid squeezed each block to
-  // ~19px and spent most of its width on months nobody asks about any more.
-  const typical = __test.gridGeometry(820);
-  assert.ok(typical.weeks >= 20 && typical.weeks <= 26, 'a typical card shows about half a year, saw ' + typical.weeks);
-  assert.ok(typical.cell >= 26, 'the blocks must be legible, saw ' + typical.cell.toFixed(1) + 'px');
-  assert.equal(__test.heatmapWeeks(1600), 26, 'a very wide card stops at half a year instead of stretching to a year');
-  assert.equal(__test.heatmapWeeks(120), 12, 'the window floor keeps a narrow card readable');
-  assert.equal(__test.heatmapWeeks(0), __test.heatmapWeeks(820), 'an unmeasured grid assumes a typical card');
-  assert.ok(__test.heatmapWeeks(500) < __test.heatmapWeeks(820), 'narrower cards show fewer weeks');
-  // Every realistic width stays in one legible band and inside its card, and the
-  // block never grows taller than the block a wider card would have drawn.
-  let previousHeight = 0;
-  for (const width of [300, 500, 700, 820, 1000, 1400, 2000]) {
+  // Sixteen weeks is the whole question this panel answers, and a fixed column
+  // count is what keeps the block one shape: deriving the window from the card
+  // made it grow on a wide screen and shrink every square on a narrow one.
+  assert.equal(__test.heatmapWeeks(), 16, 'the window is a quarter of a year, whatever the card is');
+  const typical = __test.gridGeometry(530);
+  assert.equal(typical.weeks, 16);
+  assert.equal(typical.cell, 26, 'a typical card gets the fixed cell size, saw ' + typical.cell);
+  assert.ok(typical.gridWidth < 500, 'the block is a compact shape, not the full card width, saw ' + typical.gridWidth.toFixed(1));
+  assert.ok(typical.gridWidth < 530, 'so it is centred in the slot rather than stretched across it');
+  // Only a card too narrow for the block shrinks the cell, and the block still
+  // never overflows its card.
+  for (const width of [1400, 1000, 820, 600, 530, 500, 420, 300]) {
     const geometry = __test.gridGeometry(width);
-    assert.ok(geometry.weeks >= 12 && geometry.weeks <= 26, 'window out of range at ' + width + ': ' + geometry.weeks);
-    assert.ok(geometry.cell >= 18 && geometry.cell <= 34, 'block width out of band at ' + width + ': ' + geometry.cell.toFixed(1));
+    assert.equal(geometry.weeks, 16, 'the window never follows the card, at ' + width + 'px');
+    assert.ok(geometry.cell <= 26, 'the cell must not exceed the fixed size at ' + width + 'px: ' + geometry.cell);
+    assert.ok(geometry.cell >= 10, 'the cell must stay readable at ' + width + 'px: ' + geometry.cell);
     assert.ok(geometry.gridWidth <= width + 0.5, 'the block overflows a ' + width + 'px card: ' + geometry.gridWidth.toFixed(1));
-    assert.ok(geometry.height <= 274, 'the block must not keep growing with the card, saw ' + geometry.height.toFixed(1));
-    previousHeight = geometry.height;
   }
-  assert.ok(previousHeight > 170, 'the blocks are the point: the block is taller than the old yearly grid');
-  assert.ok(__test.gridGeometry(820).cell > 26, 'the squares must be visibly bigger than the old year-long grid');
+  assert.ok(__test.gridGeometry(300).cell < __test.gridGeometry(530).cell, 'a narrow card shrinks the cell instead of overflowing');
+  assert.equal(__test.gridGeometry(0).cell, 26, 'an unmeasured card assumes a typical one');
+  assert.ok(__test.gridGeometry(530).cell > 20, 'the squares must stay visibly bigger than the old year-long grid');
 });
 
 /**
@@ -671,9 +669,12 @@ test('the day-scale views share one measured slot that reserves their height', (
   for (const width of [0, 300, 560, 820, 1184, 1600]) {
     const geometry = __test.gridGeometry(width);
     assert.equal(__test.viewSlotHeight(width), Math.round(geometry.height), 'the slot must be the block its views draw at ' + width + 'px');
-    assert.ok(geometry.height > 170, 'the block must be taller than the old fixed-height weekly chart at ' + width + 'px');
   }
-  assert.ok(__test.viewSlotHeight(820) > 200, 'a typical card reserves the taller grid, saw ' + __test.viewSlotHeight(820));
+  // The block has one size from a typical card upwards, so a wide dialog does
+  // not grow it: that was the "block is a bit too big" complaint.
+  assert.equal(__test.viewSlotHeight(530), __test.viewSlotHeight(1600), 'the block must not grow with the card');
+  assert.ok(__test.viewSlotHeight(530) < 230, 'a typical card keeps the block compact, saw ' + __test.viewSlotHeight(530));
+  assert.ok(__test.viewSlotHeight(300) < __test.viewSlotHeight(530), 'only a narrow card shrinks it');
 });
 
 test('the two day-scale views derive one window from a passed width', () => {
@@ -737,8 +738,11 @@ test('a week sits exactly under its seven days', () => {
     const bars = collect(__test.components.WeeklyBars({ t, model, metric: 'all', width }))
       .filter((node) => typeof node.props.className === 'string' && node.props.className.split(' ').includes('dts-week-bar'));
     assert.equal(bars.length, geometry.weeks, 'one bar per week at ' + width + 'px');
-    assert.equal(bars[0].props.x, geometry.gutter + geometry.gap, 'the first bar must start where the first grid column starts');
-    assert.equal(bars[0].props.width, geometry.cell, 'a bar must be exactly as wide as a day square');
+    // A bar is inset inside its column — the gap the reader asked for — but its
+    // centre is the column's centre, which is what keeps a week under its days.
+    assert.ok(bars[0].props.width < geometry.cell, 'a bar must be narrower than its column at ' + width + 'px');
+    assert.ok(bars[0].props.width >= geometry.cell - 8, 'but not so narrow that it reads as a line: ' + bars[0].props.width);
+    assert.equal(bars[0].props.x + bars[0].props.width / 2, geometry.gutter + geometry.gap + geometry.cell / 2, 'the first bar must be centred in the first grid column');
     for (let i = 1; i < bars.length; i += 1) {
       assert.ok(Math.abs((bars[i].props.x - bars[i - 1].props.x) - geometry.pitch) < 1e-9, 'every bar must keep the grid pitch');
     }

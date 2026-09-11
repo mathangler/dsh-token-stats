@@ -10,8 +10,8 @@ the numbers you would otherwise have to guess at.
 | Block | What it is |
 |---|---|
 | Dashboard | Six figures: lifetime tokens, peak day (with its date), today, last 7 days, daily average (per active day), and the cache-read share of all tokens |
-| Daily | A GitHub-style contribution heatmap. One block, always ending today: the window follows the card width but stays between a quarter and half a year (24 weeks at a typical ~820px card), which keeps each day at a readable ~30px square — a year-long grid squeezed them to ~19px and spent most of its width on months nobody asks about any more. Colour depth is continuous (see below). Days that have not happened yet keep a dashed slot |
-| Weekly | One bar per week over the **same block**: same window, same column pitch, same width and height, aligned column-for-column, so switching views never shifts the data |
+| Daily | A GitHub-style contribution heatmap, always ending today: a **fixed sixteen weeks** (a quarter of a year) of 26px squares, centred in the card. The window is deliberately not derived from the card width — that made the block grow on a wide screen and squeeze every square on a narrow one — so only a card too narrow for the block shrinks the cells. Colour depth is continuous (see below). Days that have not happened yet keep a dashed slot |
+| Weekly | One bar per week over the **same block**: same window, column pitch, width and height, aligned column-for-column, with each bar inset inside its column so consecutive weeks read as separate bars |
 | Trend | One smooth line per model over the selected range. The axis granularity follows the range: day up to a month, week up to six months, month up to two years, year beyond |
 | Share | A ring chart of per-model usage in the selected range, with a named legend and the range total in the middle |
 

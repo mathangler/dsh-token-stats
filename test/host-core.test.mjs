@@ -291,8 +291,33 @@ test('a scan reads each session once and then reuses unchanged logs', async () =
   assert.deepEqual(second.models[0].buckets, [4, 2, 0, 0], 'a reused rollup still answers the payload');
 });
 
-test('a grown log is re-read and replaces its own buckets', async () => {
-  const session = { header: { id: 's1', isSeeded: false }, inheritedEventCount: 0, events: sessionEvents('m', usage(4, 2, 0, 0), 1789000000000) };
+/**
+ * The host has one thread, and folding a changed session is synchronous work on
+ * it. A scan therefore has to hand the loop back between sessions, or a panel
+ * request whose answer is already cached waits for the whole pass: measured
+ * against the live host, summary calls issued during a rescan took 0.5–3.9s.
+ */
+test('a scan yields the loop between sessions', async () => {
+  const sessions = [
+    { header: { id: 'a', isSeeded: false }, inheritedEventCount: 0, events: sessionEvents('m', usage(4, 2, 0, 0), 1789000000000) },
+    { header: { id: 'b', isSeeded: false }, inheritedEventCount: 0, events: sessionEvents('m', usage(6, 3, 0, 0), 1789000001000) },
+  ];
+  const query = stubQuery(sessions);
+  const timerRan = { value: false, atRead: [] };
+  setTimeout(() => { timerRan.value = true; }, 0);
+  const original = query.readSession;
+  query.readSession = async (id) => {
+    timerRan.atRead.push(timerRan.value);
+    return original(id);
+  };
+
+  const handlers = createHandlers({ get: () => undefined }, { sessionQuery: query, cachePath: null, aggregateTtlMs: 0 });
+  const payload = await handlers.summary({});
+  assert.equal(payload.scope.sessions, 2);
+  assert.deepEqual(timerRan.atRead, [false, true], 'the second session must be folded only after a macrotask turn');
+});
+
+test('a grown log is re-read and replaces its own buckets', async () => {  const session = { header: { id: 's1', isSeeded: false }, inheritedEventCount: 0, events: sessionEvents('m', usage(4, 2, 0, 0), 1789000000000) };
   const query = stubQuery([session]);
   const handlers = createHandlers({ get: () => undefined }, { sessionQuery: query, cachePath: null, aggregateTtlMs: 0 });
   await handlers.summary({});

@@ -140,6 +140,11 @@ Four things keep a scan cheap, each measured on a 22-session machine:
   re-entering Settings never shows a loading state for numbers it already has.
 * **The last aggregate is persisted alongside the rollup**, so even the first panel
   open after a host restart is answered from disk rather than waiting for a scan.
+* **The scan hands the event loop back between sessions.** Parsing and folding a
+  changed log is synchronous work on the host's single thread, and the live
+  session's log is tens of megabytes; measured against the live host, panel
+  requests issued during a rescan waited 0.5–3.9s for the pass to finish. One
+  macrotask per session lets an answer that is already cached out between them.
 
 Together these took a warm scan from about 3.0s to about 0.2s. A panel open is now
 answered at once from one of three places: the 60-second aggregate cache, the

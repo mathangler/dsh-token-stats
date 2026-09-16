@@ -162,13 +162,13 @@ test('a closed session is freshness-checked from metadata without parsing its lo
   const persistence = {
     stat: async (id) => { stats.push(id); return { header: { id }, revision: 'rev-1', eventCount: 4, sizeBytes: 512 }; },
   };
-  const handlers = createHandlers({ get: () => undefined }, { sessionQuery: query, sessionPersistence: persistence, cachePath: null, aggregateTtlMs: 0 });
+  const handlers = createHandlers({ get: () => undefined }, { sessionQuery: query, sessionPersistence: persistence, cachePath: null, aggregateTtlMs: 60000 });
   const first = await handlers.summary({});
   assert.deepEqual(first.models[0].buckets, [4, 2, 0, 0]);
   assert.equal(stats.length, 1, 'the cheap metadata path must be consulted');
   assert.equal(parses, 0, 'a closed session must not be parsed just to detect change');
 
-  const second = await handlers.summary({ force: true });
+  const second = await settled(handlers, { force: true });
   assert.equal(second.scope.reused, 1);
   assert.equal(parses, 0, 'the second scan must stay off the parse path too');
 });
@@ -179,9 +179,117 @@ test('a live session is still parsed so unflushed events are counted', async () 
   const list = query.listEvents;
   query.listEvents = async (id) => { parses += 1; return list(id); };
   const persistence = { stat: async (id) => ({ header: { id }, revision: 'rev-1', eventCount: 99, sizeBytes: 999 }) };
-  const handlers = createHandlers({ get: () => undefined }, { sessionQuery: query, sessionPersistence: persistence, cachePath: null, aggregateTtlMs: 0 });
+  const handlers = createHandlers({ get: () => undefined }, { sessionQuery: query, sessionPersistence: persistence, cachePath: null, aggregateTtlMs: 60000 });
   await handlers.summary({});
   assert.equal(parses, 1, 'a live session\u2019s file metadata can lag its in-memory events');
+});
+
+/**
+ * The live session is the one log that changes between two scans, so it decides
+ * what a refresh costs. Reading it through `readSession` deep-copies every event
+ * and replays the log (~4.9s for the ~31MB session measured on this machine, on
+ * the host's only thread); observing it is O(1) for the change marker and hands
+ * the fold the same events without copying them.
+ */
+test('a live session is observed once instead of listed and then read', async () => {
+  const query = observingQuery([{ header: { id: 's1', isSeeded: false }, live: true, inheritedEventCount: 0, events: sessionEvents('m', usage(4, 2, 0, 0), 1789000000000) }]);
+  const handlers = createHandlers({ get: () => undefined }, { sessionQuery: query, cachePath: null, aggregateTtlMs: 60000 });
+  const first = await handlers.summary({});
+  assert.deepEqual(first.models[0].buckets, [4, 2, 0, 0]);
+  assert.equal(query.counts.observations, 1, 'the live session is observed once per scan');
+  assert.equal(query.counts.materializations, 1, 'and its events are read exactly once');
+  assert.deepEqual(query.reads, [], 'observing replaces the whole-log read');
+  assert.deepEqual(query.listings, [], 'and the one-record-per-event listing before it');
+  assert.equal(query.counts.released, query.counts.observations, 'every observation is handed back');
+});
+
+test('a live session that has not grown is never materialized again', async () => {
+  const session = { header: { id: 's1', isSeeded: false }, live: true, inheritedEventCount: 0, events: sessionEvents('m', usage(4, 2, 0, 0), 1789000000000) };
+  const query = observingQuery([session]);
+  const handlers = createHandlers({ get: () => undefined }, { sessionQuery: query, cachePath: null, aggregateTtlMs: 60000 });
+  await handlers.summary({});
+  const second = await settled(handlers, { force: true });
+  assert.equal(second.scope.reused, 1);
+  assert.equal(second.scope.read, 0);
+  assert.equal(query.counts.materializations, 1, 'the second scan must not touch the log at all');
+  assert.equal(query.counts.released, query.counts.observations, 'reusing still hands the observation back');
+  assert.deepEqual(query.reads, []);
+});
+
+test('a grown live log replaces its own buckets through the observation', async () => {
+  const session = { header: { id: 's1', isSeeded: false }, live: true, inheritedEventCount: 0, events: sessionEvents('m', usage(4, 2, 0, 0), 1789000000000) };
+  const query = observingQuery([session]);
+  const handlers = createHandlers({ get: () => undefined }, { sessionQuery: query, cachePath: null, aggregateTtlMs: 60000 });
+  await handlers.summary({});
+  session.events = session.events.concat([
+    { type: 'turn/start', time: 1789000001000, data: { turn: 2 } },
+    { type: 'step/start', time: 1789000001000, data: { step: 1 } },
+    assistant(1789000001000, 2, 1, 'prov', 'm', usage(6, 3, 0, 0)),
+  ]);
+  const grown = await settled(handlers, { force: true });
+  assert.equal(grown.scope.read, 1);
+  assert.deepEqual(grown.models[0].buckets, [10, 5, 0, 0], 'the whole live log is folded, never a delta');
+  assert.equal(query.counts.materializations, 2, 'a grown log is read once more');
+  assert.deepEqual(query.reads, [], 'still no whole-log read through readSession');
+});
+
+test('a live session that cannot be observed fails like any other unreadable log', async () => {
+  const query = observingQuery([
+    { header: { id: 'ok', isSeeded: false }, live: true, inheritedEventCount: 0, events: sessionEvents('m', usage(4, 2, 0, 0), 1789000000000) },
+    { header: { id: 'gone', isSeeded: false }, live: true, inheritedEventCount: 0, events: [] },
+  ]);
+  const observe = query.observeSession;
+  query.observeSession = async (id) => {
+    if (id === 'gone') throw new Error('session "' + id + '" not found');
+    return observe(id);
+  };
+  const handlers = createHandlers({ get: () => undefined }, { sessionQuery: query, cachePath: null, aggregateTtlMs: 60000 });
+  const payload = await handlers.summary({});
+  assert.equal(payload.scope.failed, 1);
+  assert.equal(payload.scope.failedSessions[0].id, 'gone');
+  assert.equal(payload.scope.failedSessions[0].error, 'Error: session "gone" not found');
+  assert.deepEqual(payload.models[0].buckets, [4, 2, 0, 0], 'one unobservable session must not lose the rest');
+  assert.equal(query.counts.released, query.counts.observations);
+});
+
+test('a refresh answers at once and the panel keeps asking until the scan lands', async () => {
+  const session = { header: { id: 's1', isSeeded: false }, inheritedEventCount: 0, events: sessionEvents('m', usage(4, 2, 0, 0), 1789000000000) };
+  const query = stubQuery([session]);
+  const handlers = createHandlers({ get: () => undefined }, { sessionQuery: query, cachePath: null, aggregateTtlMs: 60000 });
+  const cold = await handlers.summary({});
+  assert.equal(cold.stale, false, 'the first ever answer has to wait for a scan');
+  session.events = session.events.concat([
+    { type: 'turn/start', time: 1789000001000, data: { turn: 2 } },
+    { type: 'step/start', time: 1789000001000, data: { step: 1 } },
+    assistant(1789000001000, 2, 1, 'prov', 'm', usage(6, 3, 0, 0)),
+  ]);
+  const started = Date.now();
+  const forced = await handlers.refresh({});
+  assert.ok(Date.now() - started < 50, 'refresh must not run the scan inside the request');
+  assert.deepEqual(forced.models[0].buckets, [4, 2, 0, 0], 'it answers with the numbers it has');
+  assert.equal(forced.stale, true, 'flagged as not being the scan it asked for');
+  assert.equal(forced.scanning, true, 'and as a scan still running');
+  const done = await settled(handlers);
+  assert.equal(done.stale, false);
+  assert.equal(done.scanning, false);
+  assert.deepEqual(done.models[0].buckets, [10, 5, 0, 0], 'the follow-up carries the scan\u2019s own output');
+});
+
+test('a scan that fails stops reporting itself instead of spinning forever', async () => {
+  const query = stubQuery([{ header: { id: 's1', isSeeded: false }, inheritedEventCount: 0, events: sessionEvents('m', usage(4, 2, 0, 0), 1789000000000) }]);
+  const handlers = createHandlers({ get: () => undefined }, { sessionQuery: query, cachePath: null, aggregateTtlMs: 60000 });
+  await handlers.summary({});
+  query.listSessions = async () => { throw new Error('listing exploded'); };
+  const forced = await handlers.refresh({});
+  assert.equal(forced.scanning, true);
+  let after = await handlers.summary({});
+  for (let i = 0; i < 50 && after.scanning === true; i += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+    after = await handlers.summary({});
+  }
+  assert.equal(after.scanning, false, 'a failed scan must stop claiming to be running');
+  assert.equal(after.stale, false, 'and the previous numbers are the best answer there is');
+  assert.deepEqual(after.models[0].buckets, [4, 2, 0, 0]);
 });
 
 test('sessions removed from the listing keep counting unless retention is off', async () => {
@@ -192,19 +300,19 @@ test('sessions removed from the listing keep counting unless retention is off', 
     listEvents: async () => session.events.map((event, index) => ({ seq: index, type: event.type, time: event.time })),
     readSession: async () => ({ session: session.header, inheritedEventCount: 0, events: session.events }),
   };
-  const handlers = createHandlers({ get: () => undefined }, { sessionQuery: query, cachePath: null, aggregateTtlMs: 0 });
+  const handlers = createHandlers({ get: () => undefined }, { sessionQuery: query, cachePath: null, aggregateTtlMs: 60000 });
   const before = await handlers.summary({});
   assert.deepEqual(before.models[0].buckets, [100, 50, 0, 0]);
   assert.equal(before.scope.retired, 0);
 
   sessions.length = 0;
-  const after = await handlers.summary({ force: true });
+  const after = await settled(handlers, { force: true });
   assert.equal(after.scope.retired, 1, 'the removed session must be reported as retained');
   assert.deepEqual(after.models[0].buckets, [100, 50, 0, 0], 'a lifetime total must not shrink when history is cleaned up');
 
-  const strict = createHandlers({ get: () => undefined }, { sessionQuery: query, cachePath: null, aggregateTtlMs: 0, retainSessions: false });
+  const strict = createHandlers({ get: () => undefined }, { sessionQuery: query, cachePath: null, aggregateTtlMs: 60000, retainSessions: false });
   await strict.summary({});
-  const emptied = await strict.summary({ force: true });
+  const emptied = await settled(strict, { force: true });
   assert.equal(emptied.scope.retired, 0);
   assert.equal(emptied.models.length, 0, 'retainSessions:false must drop removed sessions');
 });
@@ -265,6 +373,64 @@ function stubQuery(sessions) {
   };
 }
 
+/**
+ * Follow one rescan all the way to its own output.
+ *
+ * Neither entry point waits for a scan any more: both answer from what the host
+ * already has and tag that answer `stale` / `scanning` while a scan runs. Tests
+ * that want the *scan's* numbers therefore have to ask the way the panel does —
+ * request the scan, then keep asking until the host stops reporting one.
+ *
+ * @param handlers - the handler map under test.
+ * @param options - `{ force?: boolean }`: force the first request to rescan.
+ * @returns the payload produced by the latest completed scan.
+ */
+async function settled(handlers, options = {}) {
+  let value = await handlers.summary(options.force === true ? { force: true } : {});
+  for (let i = 0; i < 200 && (value.stale === true || value.scanning === true); i += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+    value = await handlers.summary({});
+  }
+  return value;
+}
+
+/**
+ * A sessionQuery stub whose sessions are reachable through `observeSession`,
+ * like the real service.
+ *
+ * `counts.materializations` counts reads of the lazily published event array,
+ * which is what makes "the cache never touched that log" a provable claim rather
+ * than an assumption; `counts.released` counts the observations handed back.
+ *
+ * @param sessions - in-memory session table, same shape as {@link stubQuery}.
+ * @returns the stub plus a `counts` record.
+ */
+function observingQuery(sessions) {
+  const query = stubQuery(sessions);
+  const counts = { observations: 0, materializations: 0, released: 0 };
+  query.counts = counts;
+  query.observeSession = async (id) => {
+    const session = sessions.find((entry) => entry.header.id === id);
+    if (session === undefined) throw new Error('unknown session');
+    const events = session.events;
+    let published;
+    counts.observations += 1;
+    return {
+      source: 'live',
+      header: session.header,
+      inheritedEventCount: session.inheritedEventCount,
+      cursor: events.length === 0 ? -1 : events.length - 1,
+      get events() {
+        counts.materializations += 1;
+        published ??= events.slice();
+        return published;
+      },
+      [Symbol.dispose]() { counts.released += 1; },
+    };
+  };
+  return query;
+}
+
 /** Events for one billed step. */
 function sessionEvents(model, buckets, time) {
   return [
@@ -277,14 +443,14 @@ function sessionEvents(model, buckets, time) {
 
 test('a scan reads each session once and then reuses unchanged logs', async () => {
   const query = stubQuery([{ header: { id: 's1', isSeeded: false }, inheritedEventCount: 0, events: sessionEvents('m', usage(4, 2, 0, 0), 1789000000000) }]);
-  const handlers = createHandlers({ get: () => undefined }, { sessionQuery: query, cachePath: null, aggregateTtlMs: 0 });
+  const handlers = createHandlers({ get: () => undefined }, { sessionQuery: query, cachePath: null, aggregateTtlMs: 60000 });
   const first = await handlers.summary({});
   assert.deepEqual(query.reads, ['s1']);
   assert.equal(first.scope.read, 1);
   assert.equal(first.scope.reused, 0);
   assert.deepEqual(first.models[0].buckets, [4, 2, 0, 0]);
 
-  const second = await handlers.summary({ force: true });
+  const second = await settled(handlers, { force: true });
   assert.deepEqual(query.reads, ['s1'], 'an unchanged log must not be re-read');
   assert.equal(second.scope.reused, 1);
   assert.equal(second.scope.read, 0);
@@ -325,14 +491,14 @@ test('a scan yields the loop between sessions', async () => {
 test('a grown log is re-read and replaces its own buckets', async () => {
   const session = { header: { id: 's1', isSeeded: false }, inheritedEventCount: 0, events: sessionEvents('m', usage(4, 2, 0, 0), 1789000000000) };
   const query = stubQuery([session]);
-  const handlers = createHandlers({ get: () => undefined }, { sessionQuery: query, cachePath: null, aggregateTtlMs: 0 });
+  const handlers = createHandlers({ get: () => undefined }, { sessionQuery: query, cachePath: null, aggregateTtlMs: 60000 });
   await handlers.summary({});
   session.events = session.events.concat([
     { type: 'turn/start', time: 1789000001000, data: { turn: 2 } },
     { type: 'step/start', time: 1789000001000, data: { step: 1 } },
     assistant(1789000001000, 2, 1, 'prov', 'm', usage(6, 3, 0, 0)),
   ]);
-  const grown = await handlers.summary({ force: true });
+  const grown = await settled(handlers, { force: true });
   assert.deepEqual(query.reads, ['s1', 's1']);
   assert.equal(grown.scope.read, 1);
   assert.deepEqual(grown.models[0].buckets, [10, 5, 0, 0], 'a replaced rollup must not double count');
@@ -397,11 +563,15 @@ test('the aggregate is served from cache inside the TTL and refreshed past it', 
   const second = await handlers.summary({});
   assert.equal(second.stale, false);
   assert.equal(query.listings.length, 1, 'no second listing inside the TTL');
+  const started = Date.now();
   const forced = await handlers.refresh({});
-  // Counted rather than compared by timestamp: two in-memory scans can land in
-  // the same millisecond.
-  assert.equal(query.listings.length, 2, 'refresh always rescans');
-  assert.equal(forced.stale, false);
+  assert.ok(Date.now() - started < 50, 'but it must not wait for that rescan to finish');
+  assert.equal(forced.stale, true, 'the answer is from before the scan it asked for');
+  assert.equal(forced.scanning, true, 'and the panel must be told a scan is running');
+  const done = await settled(handlers);
+  assert.equal(query.listings.length, 2, 'refresh always rescans, just not inside the request');
+  assert.equal(done.stale, false);
+  assert.equal(done.scanning, false);
 });
 
 test('a stale aggregate is answered at once and refreshed behind the response', async () => {
@@ -474,13 +644,13 @@ test('a persistent rollup is written and reused across handler instances', async
   const cachePath = join(dir, 'rollup.json');
   try {
     const session = { header: { id: 's1', isSeeded: false }, inheritedEventCount: 0, events: sessionEvents('m', usage(4, 2, 0, 0), 1789000000000) };
-    const first = createHandlers({ get: () => undefined }, { sessionQuery: stubQuery([session]), cachePath, aggregateTtlMs: 0 });
+    const first = createHandlers({ get: () => undefined }, { sessionQuery: stubQuery([session]), cachePath, aggregateTtlMs: 60000 });
     await first.summary({});
     const secondQuery = stubQuery([session]);
-    const second = createHandlers({ get: () => undefined }, { sessionQuery: secondQuery, cachePath, aggregateTtlMs: 0 });
+    const second = createHandlers({ get: () => undefined }, { sessionQuery: secondQuery, cachePath, aggregateTtlMs: 60000 });
     // Force a scan: a plain summary now answers from the restored aggregate, so
     // only an explicit rescan proves the per-session rollup itself survived.
-    const payload = await second.refresh({});
+    const payload = await settled(second, { force: true });
     assert.deepEqual(secondQuery.reads, [], 'a warm rollup survives a handler restart');
     assert.equal(payload.scope.reused, 1);
     assert.deepEqual(payload.models[0].buckets, [4, 2, 0, 0]);

@@ -782,6 +782,26 @@ test('a stale answer is followed up a bounded number of times', () => {
   assert.ok(covered >= 25000, 'the follow-ups must cover the slowest measured rescan, saw ' + covered + 'ms');
 });
 
+/**
+ * The host never makes a request wait for a scan, so a panel open during one —
+ * or a click on the refresh button, which starts one — sees `scanning: true`.
+ * That flag is what keeps the panel asking until the scan's own output arrives,
+ * and the budget for it can be a slow-cadence one because the host says exactly
+ * when the work is still running.
+ */
+test('a running scan is followed up on its own longer budget', () => {
+  const { __test } = loadClient().mod;
+  const scanningTries = __test.SCAN_MAX_TRIES;
+  assert.ok(scanningTries > __test.STALE_MAX_TRIES, 'a reported scan may take longer than a cached answer\'s follow-ups');
+  assert.ok(scanningTries * __test.SCAN_RETRY_MS >= 90000, 'the covered wait must outlast a cold scan of a large history');
+  assert.equal(__test.staleFollowUp({ stale: false, scanning: true, days: [] }, 0), true, 'a running scan is not a final answer');
+  assert.equal(__test.staleFollowUp({ stale: false, scanning: true, days: [] }, scanningTries - 1), true, 'the scan budget is not cut short');
+  assert.equal(__test.staleFollowUp({ stale: false, scanning: true, days: [] }, scanningTries), false, 'and it is still bounded');
+  assert.equal(__test.staleFollowUp({ stale: true, scanning: true, days: [] }, __test.STALE_MAX_TRIES), true, 'a stale answer rides the scan budget, not the short one');
+  assert.equal(__test.staleRetryDelay(0, true), __test.SCAN_RETRY_MS, 'a running scan is polled on its own cadence');
+  assert.equal(__test.staleRetryDelay(0, false), 700, 'and a quiet host keeps the original quick first retry');
+});
+
 test('the ring path closes an annulus', () => {
   const { __test } = loadClient().mod;
   assert.equal(__test.ringPath(50, 50, 40, 24, 0, Math.PI * 2), null, 'a full circle is drawn as a stroked circle instead');

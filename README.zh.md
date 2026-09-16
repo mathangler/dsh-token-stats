@@ -35,6 +35,10 @@ dsh plugin --profile web add github:mathangler/dsh-token-stats
 补丁会往 profile 里插一行宿主半边。浏览器半边由 `package.json` 里的
 `dsh.client.platform: web` 声明自动加载。开发与验证基于 DSH `0.1.5-rc.1`。
 
+刷新会立即返回，并在后台重新扫描，这期间屏幕上保留原有数字。宿主的
+`sessionQuery` 提供 `observeSession` 时，正在运行的会话通过该观测读取；不提供时
+插件依然可用，只是改为整份读取会话日志。
+
 要更新已安装的副本，必须先移除再安装 —— spec 不变时 pnpm 不会重新解析 git HEAD：
 
 ```bash

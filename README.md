@@ -43,6 +43,11 @@ The bundle patch inserts one host row into the profile. The browser half is
 loaded automatically because `package.json` declares `dsh.client.platform: web`.
 Built and verified against DSH `0.1.5-rc.1`.
 
+A refresh answers immediately and keeps the numbers on screen while the rescan
+runs behind it. A harness whose `sessionQuery` offers `observeSession` reads a
+running session through that observation; on a harness without it the plugin
+still works and reads whole session logs instead.
+
 To update an installed copy, remove it first and add it again — pnpm will not
 re-resolve a git HEAD while the spec is unchanged:
 

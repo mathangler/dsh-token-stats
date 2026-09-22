@@ -13,19 +13,28 @@ import assert from 'node:assert/strict';
 import { Readable } from 'node:stream';
 import { apply, CHANNEL } from '../lib/index.js';
 
-/** Install the plugin against a stub context and return the registered route. */
+/**
+ * Install the plugin against a stub context and return the registered route.
+ *
+ * `inject` runs its body immediately when the named services are already
+ * present, which is what a full composition looks like; the stub reports every
+ * optional key as available so the eager warm-up path is exercised too.
+ */
 function mount(config) {
   const routes = [];
   const disposers = [];
+  const warmups = [];
   const ctx = {
     effect: (fn) => { const dispose = fn(); disposers.push(dispose); return dispose; },
     get: () => undefined,
+    inject: (names, run) => { warmups.push(names); run(); },
     webServer: { register: (route) => { routes.push(route); return () => {}; } },
     connection: { requestRejection: (req) => req.rejectAs },
   };
   apply(ctx, config);
   return {
     route: routes[0],
+    warmups,
     dispose: () => { for (const dispose of disposers) if (typeof dispose === 'function') dispose(); },
   };
 }
@@ -178,6 +187,7 @@ test('nothing is served without the platform fence being consulted', async () =>
   const ctx = {
     effect: (fn) => { const dispose = fn(); return dispose; },
     get: () => undefined,
+    inject: (names, run) => { run(); },
     webServer: { register: (route) => { routes.push(route); return () => {}; } },
     connection: { requestRejection: () => { consulted += 1; return 401; } },
   };

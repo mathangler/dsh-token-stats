@@ -122,44 +122,57 @@ single scale: an extreme outlier would push every other day toward the floor.
 
 ## Performance and caching
 
-Reading every session log on every panel open would be wasteful, so each
-session's folded buckets are cached per session id, keyed by its log marker.
-Unchanged sessions are reused; only a log that grew is re-read and its buckets
-replaced. The rollup is persisted to
-`<system temp>/dsh-token-stats/rollup-v1.json` — the system temp directory, never
-`~/.dsh` — and a missing, stale or corrupt rollup only costs one full rescan.
+A refresh is answered from the platform's own numbers wherever it can be, and only
+falls back to reading a log when it must. Six things keep a scan cheap, each
+measured on a real 14-session / 36MB corpus:
 
-Four things keep a scan cheap, each measured on a 22-session machine:
+* **The platform's `tokenUsage` projection is the first source.** `dsh-token-meter`
+  registers a projection unit and `dsh-session-projection-cache` checkpoints it on
+  every turn boundary, so the harness has *already* folded and stored every
+  session's provider-reported totals. Reading them back is a Map lookup plus a
+  schema check against the listed header's lifecycle identity — no open, no stat,
+  no read. On the corpus measured here **10 of 14 sessions** answered this way in
+  ~4ms, where deriving the same numbers from their logs cost 11.1s for the largest
+  one alone.
+* **A closed session is read through the persistence handle, not `readSession`.**
+  `sessionQuery.readSession` returns a *validated* snapshot: it replays the whole
+  log to prove it is well-formed, which is right before resuming a session and far
+  too much for counting four numbers per assistant message. Over the same corpus:
+  **29.9s through `readSession` against ~3.3s through `handle.read()`**, with
+  identical totals. The query read remains the fallback when no persistence service
+  is mounted.
+* **Metadata change detection, keyed on the log rather than the file.** A closed
+  session's marker comes from `sessionPersistence.stat()`'s `eventCount`; `sizeBytes`
+  is only consulted when no count exists, because the byte size also moves when the
+  store re-compresses an unchanged log, and keying on it made every refresh re-read
+  every large session for nothing.
+* **Failure memoization.** A log no path can read is remembered with the marker it
+  failed at and retried only once that log changes. If the platform still has a
+  cached total for it, that total is kept rather than dropping the session from the
+  totals.
+* **The last aggregate is persisted alongside the rollup**, so the first panel open
+  after a host restart is answered from disk rather than waiting for a scan.
+* **The scan hands the event loop back between sessions.** Folding is synchronous
+  work on the host's single thread; one macrotask per session keeps a request whose
+  answer is already cached from waiting behind a whole pass.
 
-* **Metadata change detection.** A closed session's marker comes from
-  `sessionPersistence.stat()` (`sizeBytes` + `eventCount`), not from parsing its
-  log; live sessions still go through `listEvents` because their newest events may
-  not have been flushed yet.
-* **Failure memoization.** A log the read path refuses is remembered together with
-  the marker it failed at, and is retried only once that log changes. Without
-  this, three unreadable logs were re-read and re-rejected on every scan, which
-  alone cost about 2.8 seconds per scan.
-* **Model names are cached for ten minutes**; resolving them can interrogate a
-  provider.
-* **The browser paints the last answer immediately** and revalidates behind it, so
-  re-entering Settings never shows a loading state for numbers it already has.
-* **The last aggregate is persisted alongside the rollup**, so even the first panel
-  open after a host restart is answered from disk rather than waiting for a scan.
-* **The scan hands the event loop back between sessions.** Parsing and folding a
-  changed log is synchronous work on the host's single thread, and the live
-  session's log is tens of megabytes; measured against the live host, panel
-  requests issued during a rescan waited 0.5–3.9s for the pass to finish. One
-  macrotask per session lets an answer that is already cached out between them.
+Measured end to end on that corpus, through the plugin's own handler:
 
-Together these took a warm scan from about 3.0s to about 0.2s. A panel open is now
-answered at once from one of three places: the 60-second aggregate cache, the
-persisted aggregate, or — when even that is past its budget — a `stale: true`
-answer that is refreshed *behind* the response while the panel revalidates and
-shows a quiet "Refreshing…" hint. On the machine this was built against, an open
-answered in 66–83ms while the same data took up to 27.5s to rescan, because that
-pass re-reads the live session's whole log; the panel follows a stale answer up on
-a bounded schedule (0.7s, growing to one request every 2.5s, twelve in all, about
-28s of coverage). An explicit refresh still rescans synchronously.
+| | before | now |
+|---|---|---|
+| cold scan (no rollup, first boot) | 31.4s | **~5.6s** |
+| restart, rollup on disk | 31.4s | **3ms** |
+| second scan, nothing changed | 31.4s | **0.95s** (13 of 14 reused) |
+| panel open, aggregate cached | 66–83ms | **7–47ms** |
+
+The totals are not an approximation of the platform's: a session's folded buckets
+are reconciled against its `tokenUsage` total, and across all 14 sessions the
+panel's grand total matched the platform's to **0.000%**.
+
+A panel open is answered at once from one of three places: the 60-second aggregate
+cache, the persisted aggregate, or a `stale: true` answer that is refreshed *behind*
+the response while the panel revalidates and shows a quiet "Refreshing…" hint. An
+explicit refresh rescans the same way.
 
 The panel measures its chart slot from the ref callback that attaches it — not
 from an effect, because on a cold open the slot does not exist yet when effects

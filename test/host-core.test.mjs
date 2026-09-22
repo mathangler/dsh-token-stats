@@ -18,6 +18,8 @@ import {
   metricValue,
   markerOf,
   localDayKey,
+  readCachedUsage,
+  lifecycleIdentity,
   toCount,
   OTHER_MODEL_KEY,
   UNKNOWN_MODEL_KEY,
@@ -275,8 +277,134 @@ test('a refresh answers at once and the panel keeps asking until the scan lands'
   assert.deepEqual(done.models[0].buckets, [10, 5, 0, 0], 'the follow-up carries the scan\u2019s own output');
 });
 
-test('a scan that fails stops reporting itself instead of spinning forever', async () => {
-  const query = stubQuery([{ header: { id: 's1', isSeeded: false }, inheritedEventCount: 0, events: sessionEvents('m', usage(4, 2, 0, 0), 1789000000000) }]);
+/**
+ * The projection fast path.
+ *
+ * The harness already folds every session's provider-reported totals into a
+ * `tokenUsage` projection and checkpoints them durably. Reading those back is a
+ * Map lookup, where re-deriving the same numbers from the logs cost 11.1s for one
+ * 12MB session — so this path is the reason a refresh is fast, and it must keep
+ * working when the services are absent, stale, or shaped differently.
+ */
+test('cached platform totals are read without touching a log', () => {
+  const header = { version: 4, id: 's1', createdAt: 1789000000000, cwd: 'C:/w', isSeeded: false };
+  const rows = { tokenUsage: { ver: 2, seq: 17222, val: { totals: { uncachedInputTokens: 10, outputTokens: 4, cacheReadTokens: 300, cacheWriteTokens: 1 }, last: null } } };
+  const asked = [];
+  const projectionCache = {
+    recordFor: (id, identity) => {
+      asked.push({ id, identity });
+      return { identity, rows };
+    },
+  };
+  const projections = {
+    viewCheckpoint: (given, keys) => (given === rows && keys.includes('tokenUsage')
+      ? { tokenUsage: { uncachedInputTokens: 10, outputTokens: 4, cacheReadTokens: 300, cacheWriteTokens: 1 } }
+      : {}),
+  };
+
+  const usage = readCachedUsage(projectionCache, projections, [header]);
+  assert.deepEqual([...usage.keys()], ['s1']);
+  assert.deepEqual(usage.get('s1').buckets, [10, 4, 300, 1], 'the platform\u2019s four buckets come back in the panel\u2019s order');
+  assert.equal(usage.get('s1').seq, 17222, 'the row watermark travels with the value so a caller can judge staleness');
+  // The identity the cache matches on is the lifecycle, and it comes from the
+  // listed header alone — no stat, no open, no read.
+  assert.deepEqual(asked[0].identity, { formatVersion: 4, createdAt: 1789000000000, cwd: 'C:/w', isSeeded: false, inheritedEventCount: 0 });
+});
+
+test('the cached path degrades to nothing rather than failing a scan', () => {
+  const header = { version: 4, id: 's1', createdAt: 1, isSeeded: false };
+  // No services at all: an older composition simply has no fast path.
+  assert.equal(readCachedUsage(undefined, undefined, [header]).size, 0);
+  assert.equal(readCachedUsage(null, null, [header]).size, 0);
+  // A service shaped differently, a throwing lookup, a missing row, a row the
+  // registry refuses to view: every one of them means "fall back to the log".
+  assert.equal(readCachedUsage({}, { viewCheckpoint: () => ({}) }, [header]).size, 0);
+  assert.equal(readCachedUsage({ recordFor: () => { throw new Error('boom'); } }, { viewCheckpoint: () => ({}) }, [header]).size, 0);
+  assert.equal(readCachedUsage({ recordFor: () => undefined }, { viewCheckpoint: () => ({}) }, [header]).size, 0);
+  assert.equal(readCachedUsage({ recordFor: () => ({ rows: {} }) }, { viewCheckpoint: () => { throw new Error('bad row'); } }, [header]).size, 0);
+  assert.equal(readCachedUsage({ recordFor: () => ({ rows: {} }) }, { viewCheckpoint: () => ({}) }, [header]).size, 0);
+});
+
+test('a cached total reconciles the fold, so the panel agrees with the platform', () => {
+  // The log yields 6 input tokens; the platform says 10 (a retry it scoped
+  // differently). The platform wins the total, and the shape of the folded data
+  // survives the correction.
+  const events = [
+    { type: 'turn/start', time: 1789000000000, data: { turn: 1 } },
+    { type: 'step/start', time: 1789000000000, data: { step: 1 } },
+    assistant(1789000000000, 1, 1, 'prov', 'mod', usage(4, 2, 0, 0)),
+    { type: 'turn/start', time: 1789000100000, data: { turn: 2 } },
+    { type: 'step/start', time: 1789000100000, data: { step: 1 } },
+    assistant(1789000100000, 2, 1, 'prov', 'mod', usage(0, 0, 0, 0)),
+  ];
+  const folded = foldSession(events, { dayKey: () => DAY, total: { buckets: [10, 6, 0, 0], seq: 99 } });
+  const total = totalOfDays(folded.days);
+  assert.deepEqual(total, [10, 6, 0, 0], 'the session total is exactly what the platform reported');
+  assert.deepEqual(folded.days[DAY]['prov/mod'], [10, 6, 0, 0], 'and it lands on the day and model that were folded');
+
+  // With no platform total the fold is left exactly as it was.
+  const plain = foldSession(events, { dayKey: () => DAY });
+  assert.deepEqual(totalOfDays(plain.days), [4, 2, 0, 0]);
+});
+
+test('a cached total rescues a session whose log cannot be read', async () => {
+  const session = { header: { id: 's1', isSeeded: false }, unreadable: true, inheritedEventCount: 0, events: [] };
+  const query = stubQuery([session]);
+  const projectionCache = {
+    recordFor: () => ({
+      rows: { tokenUsage: { ver: 2, seq: 42, val: { totals: {}, last: null } } },
+    }),
+  };
+  const projections = {
+    viewCheckpoint: () => ({ tokenUsage: { uncachedInputTokens: 5, outputTokens: 3, cacheReadTokens: 700, cacheWriteTokens: 0 } }),
+  };
+  const handlers = createHandlers(
+    { get: () => undefined },
+    { sessionQuery: query, sessionProjectionCache: projectionCache, sessionProjections: projections, cachePath: null, aggregateTtlMs: 0 },
+  );
+  const payload = await handlers.summary({});
+  // The query service refuses this log, but the platform can still account for
+  // the session: its total is kept, parked on the session's creation day.
+  assert.equal(payload.scope.failed, 0, 'a session the platform can account for is not a failure');
+  assert.equal(payload.scope.cached, 1);
+  assert.equal(totalOfWireDays(payload.days)[2], 700, 'the cached total is not lost');
+  assert.equal(payload.models[payload.models.length - 1].key, UNKNOWN_MODEL_KEY, 'undated usage is attributed to no model');
+});
+
+test('the durable rollup is keyed on the log, not on the file that holds it', async () => {
+  const { mkdtemp, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-token-stats-test-'));
+  const cachePath = join(dir, 'rollup.json');
+  try {
+    const session = { header: { id: 's1', isSeeded: false }, inheritedEventCount: 0, events: sessionEvents('m', usage(4, 2, 0, 0), 1789000000000) };
+    // A store that reports a stable event count and a byte size the rewriter
+    // changes: compaction must not invalidate an unchanged log.
+    let bytes = 1000;
+    const query = stubQuery([session]);
+    const persistence = {
+      stat: async () => ({ header: session.header, eventCount: 4, sizeBytes: bytes }),
+      open: async () => { throw new Error('not used'); },
+      list: async () => [],
+    };
+    const first = createHandlers({ get: () => undefined }, { sessionQuery: query, sessionPersistence: persistence, cachePath, aggregateTtlMs: 0 });
+    await first.refresh({});
+    assert.deepEqual(query.reads, ['s1']);
+    bytes = 900;
+    const second = createHandlers({ get: () => undefined }, { sessionQuery: query, sessionPersistence: persistence, cachePath, aggregateTtlMs: 0 });
+    // The rollup is restored before the scan runs, so `summary` answers from it at
+    // once and the scan settles behind the response; `settled` asks the way the
+    // panel does and hands back the scan's own output.
+    const payload = await settled(second);
+    assert.deepEqual(query.reads, ['s1'], 'a re-compressed but unchanged log must not be re-read');
+    assert.equal(payload.scope.reused, 1, 'the session is answered from the rollup, not re-folded');
+    assert.equal(payload.scope.read, 0);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a scan that fails stops reporting itself instead of spinning forever', async () => {  const query = stubQuery([{ header: { id: 's1', isSeeded: false }, inheritedEventCount: 0, events: sessionEvents('m', usage(4, 2, 0, 0), 1789000000000) }]);
   const handlers = createHandlers({ get: () => undefined }, { sessionQuery: query, cachePath: null, aggregateTtlMs: 60000 });
   await handlers.summary({});
   query.listSessions = async () => { throw new Error('listing exploded'); };
@@ -431,9 +559,29 @@ function observingQuery(sessions) {
   return query;
 }
 
+/** Sum the wire payload's day rows into four buckets. */
+function totalOfWireDays(days) {
+  const total = [0, 0, 0, 0];
+  for (const day of days) {
+    for (let i = 0; i < 4; i += 1) total[i] += day.b[i];
+  }
+  return total;
+}
+
+/** Sum a day × model table, for assertions about session totals. */
+function totalOfDays(days) {
+  const total = [0, 0, 0, 0];
+  for (const day of Object.keys(days)) {
+    for (const model of Object.keys(days[day])) {
+      const buckets = days[day][model];
+      for (let i = 0; i < 4; i += 1) total[i] += buckets[i];
+    }
+  }
+  return total;
+}
+
 /** Events for one billed step. */
-function sessionEvents(model, buckets, time) {
-  return [
+function sessionEvents(model, buckets, time) {  return [
     { type: 'turn/start', time, data: { turn: 1 } },
     { type: 'step/start', time, data: { step: 1 } },
     assistant(time, 1, 1, 'prov', model, buckets),

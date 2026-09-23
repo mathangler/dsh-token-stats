@@ -123,50 +123,62 @@ single scale: an extreme outlier would push every other day toward the floor.
 ## Performance and caching
 
 A refresh is answered from the platform's own numbers wherever it can be, and only
-falls back to reading a log when it must. Six things keep a scan cheap, each
-measured on a real 14-session / 36MB corpus:
+falls back to reading a log when it must. Seven things keep a scan cheap, measured
+on a real 25-session / 42MB corpus:
 
 * **The platform's `tokenUsage` projection is the first source.** `dsh-token-meter`
   registers a projection unit and `dsh-session-projection-cache` checkpoints it on
   every turn boundary, so the harness has *already* folded and stored every
   session's provider-reported totals. Reading them back is a Map lookup plus a
   schema check against the listed header's lifecycle identity — no open, no stat,
-  no read. On the corpus measured here **10 of 14 sessions** answered this way in
-  ~4ms, where deriving the same numbers from their logs cost 11.1s for the largest
-  one alone.
+  no read.
+* **A marker is only computed when it can change the answer.** Deriving the
+  day/model split is the one thing the platform does not record, so it is the only
+  reason to read a log. When the platform's total for a session matches the one the
+  last split was reconciled against, the split is proven current and the session is
+  carried over without a `stat`, an `observeSession`, or a read. This matters most
+  for a live session: `observeSession` on the 13MB session being written cost 4.5s
+  on its own, paid on every refresh, purely to conclude that nothing had changed.
+* **Deriving splits is budgeted.** A cold corpus wants ~20s of log reading to place
+  every session on the calendar, which no panel open should wait for. A scan spends
+  at most `SPLIT_BUDGET_MS` (2.5s) deriving splits and defers the rest; deferred
+  sessions still report the platform's **exact total** under the unattributed key on
+  their creation day, and the following scan reads their log and replaces it. The
+  set drains to zero — measured 8 → 5 → 3 → 1 → 0 across five scans — and every
+  scan's grand total was equal to the platform's to the token throughout.
 * **A closed session is read through the persistence handle, not `readSession`.**
   `sessionQuery.readSession` returns a *validated* snapshot: it replays the whole
   log to prove it is well-formed, which is right before resuming a session and far
   too much for counting four numbers per assistant message. Over the same corpus:
   **29.9s through `readSession` against ~3.3s through `handle.read()`**, with
-  identical totals. The query read remains the fallback when no persistence service
-  is mounted.
+  identical totals.
 * **Metadata change detection, keyed on the log rather than the file.** A closed
   session's marker comes from `sessionPersistence.stat()`'s `eventCount`; `sizeBytes`
   is only consulted when no count exists, because the byte size also moves when the
   store re-compresses an unchanged log, and keying on it made every refresh re-read
   every large session for nothing.
-* **Failure memoization.** A log no path can read is remembered with the marker it
-  failed at and retried only once that log changes. If the platform still has a
-  cached total for it, that total is kept rather than dropping the session from the
-  totals.
+* **A format migration does not discard cached totals.** The projection cache binds
+  a record to a session's format generation, so a harness upgrade that migrates
+  stored logs makes an exact-generation lookup miss every session it touched —
+  measured here: a v3→v4 migration silently cost 4 of 25 sessions their cached
+  totals. A row from the immediately preceding generation is read anyway, because
+  the generation governs how a log is *decoded*, not how many tokens it reports.
 * **The last aggregate is persisted alongside the rollup**, so the first panel open
-  after a host restart is answered from disk rather than waiting for a scan.
-* **The scan hands the event loop back between sessions.** Folding is synchronous
-  work on the host's single thread; one macrotask per session keeps a request whose
-  answer is already cached from waiting behind a whole pass.
+  after a host restart is answered from disk, and the scan hands the event loop back
+  between sessions so a request whose answer is already cached never waits behind a
+  whole pass.
 
 Measured end to end on that corpus, through the plugin's own handler:
 
 | | before | now |
 |---|---|---|
-| cold scan (no rollup, first boot) | 31.4s | **~5.6s** |
+| cold scan (no rollup, first boot) | 31.4s | **~2.9s** |
 | restart, rollup on disk | 31.4s | **3ms** |
-| second scan, nothing changed | 31.4s | **0.95s** (13 of 14 reused) |
+| re-scan, nothing changed | 31.4s | **0.2–0.5s**, zero log reads |
 | panel open, aggregate cached | 66–83ms | **7–47ms** |
 
 The totals are not an approximation of the platform's: a session's folded buckets
-are reconciled against its `tokenUsage` total, and across all 14 sessions the
+are reconciled against its `tokenUsage` total, and across all 25 sessions the
 panel's grand total matched the platform's to **0.000%**.
 
 A panel open is answered at once from one of three places: the 60-second aggregate

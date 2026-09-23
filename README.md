@@ -141,11 +141,13 @@ on a real 25-session / 42MB corpus:
   on its own, paid on every refresh, purely to conclude that nothing had changed.
 * **Deriving splits is budgeted.** A cold corpus wants ~20s of log reading to place
   every session on the calendar, which no panel open should wait for. A scan spends
-  at most `SPLIT_BUDGET_MS` (2.5s) deriving splits and defers the rest; deferred
+  at most `SPLIT_BUDGET_MS` (1s) deriving splits and defers the rest; deferred
   sessions still report the platform's **exact total** under the unattributed key on
-  their creation day, and the following scan reads their log and replaces it. The
-  set drains to zero — measured 8 → 5 → 3 → 1 → 0 across five scans — and every
-  scan's grand total was equal to the platform's to the token throughout.
+  their creation day, and the following scan reads their log and replaces it. A
+  session parked that way records *which platform row* its placement came from, so
+  the next scan recognises it as already reconciled and does not read it again — that
+  bookkeeping is what a repeat refresh depends on, and getting it wrong meant the
+  same sessions re-entered the read queue on every refresh forever.
 * **A closed session is read through the persistence handle, not `readSession`.**
   `sessionQuery.readSession` returns a *validated* snapshot: it replays the whole
   log to prove it is well-formed, which is right before resuming a session and far
@@ -172,9 +174,9 @@ Measured end to end on that corpus, through the plugin's own handler:
 
 | | before | now |
 |---|---|---|
-| cold scan (no rollup, first boot) | 31.4s | **~2.9s** |
+| cold scan (no rollup, first boot) | 31.4s | **~1.2s** |
 | restart, rollup on disk | 31.4s | **3ms** |
-| re-scan, nothing changed | 31.4s | **0.2–0.5s**, zero log reads |
+| **pressing Refresh again** | **4–5s** | **0.14–0.7s**, zero log reads |
 | panel open, aggregate cached | 66–83ms | **7–47ms** |
 
 The totals are not an approximation of the platform's: a session's folded buckets

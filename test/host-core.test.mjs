@@ -371,6 +371,63 @@ test('a cached total rescues a session whose log cannot be read', async () => {
   assert.equal(payload.models[payload.models.length - 1].key, UNKNOWN_MODEL_KEY, 'undated usage is attributed to no model');
 });
 
+/**
+ * The regression that made every refresh cost seconds.
+ *
+ * A scan that runs out of its split budget parks a session on the platform's own
+ * total and records which platform row that placement came from. Recording
+ * `undefined` there instead (because the entry being replaced had no row) meant the
+ * session could never satisfy the carry-over test, so it re-entered the read queue
+ * on EVERY scan: measured on a real corpus, 5 of 25 sessions were re-read on every
+ * refresh forever, which was most of a 3-5s refresh. A repeat refresh must not read
+ * a log at all once every session has been placed.
+ */
+test('a session parked on its platform total is not re-read on the next scan', async () => {
+  const sessions = [
+    { header: { id: 'big', isSeeded: false, version: 4, createdAt: 1789000000000 }, inheritedEventCount: 0, events: sessionEvents('m', usage(1000, 200, 5000, 0), 1789000000000) },
+    { header: { id: 'small', isSeeded: false, version: 4, createdAt: 1789000000000 }, inheritedEventCount: 0, events: sessionEvents('m', usage(10, 2, 30, 0), 1789000000000) },
+  ];
+  const query = stubQuery(sessions);
+  const totals = {
+    big: { uncachedInputTokens: 1000, outputTokens: 200, cacheReadTokens: 5000, cacheWriteTokens: 0 },
+    small: { uncachedInputTokens: 10, outputTokens: 2, cacheReadTokens: 30, cacheWriteTokens: 0 },
+  };
+  const perId = (id) => (totals[id] === undefined
+    ? undefined
+    : { identity: { formatVersion: 4 }, rows: { tokenUsage: { ver: 2, seq: 99, val: { totals: {}, last: null } } } });
+  // The registry views a row for whichever session the cache was just asked about.
+  let asked = 'big';
+  const projectionCache = {
+    recordFor: (id) => {
+      asked = id;
+      return perId(id);
+    },
+  };
+  const projections = { viewCheckpoint: () => ({ tokenUsage: totals[asked] }) };
+
+  // An exhausted budget parks every split on the first scan, which is the state
+  // this test is about: both sessions reported from the platform cache alone.
+  const handlers = createHandlers(
+    { get: () => undefined },
+    { sessionQuery: query, sessionProjectionCache: projectionCache, sessionProjections: projections, cachePath: null, aggregateTtlMs: 0, splitBudgetMs: -1 },
+  );
+  const first = await handlers.summary({});
+  assert.equal(first.scope.deferred, 2, 'an exhausted budget parks both sessions');
+  assert.equal(first.scope.cached, 2, 'and both are still answered from the platform total');
+  const readsAfterFirst = query.reads.length;
+
+  // The parked placement was reconciled against the platform row that produced it,
+  // so the next scan must not read either log: this is the regression that made a
+  // repeat refresh cost seconds, because a parked session could never satisfy the
+  // carry-over test and so re-entered the read queue forever.
+  //
+  // `refresh` publishes the current aggregate and scans behind it, so the scan's own
+  // numbers have to be asked for the way the panel asks for them.
+  const second = await settled(handlers, { force: true });
+  assert.equal(query.reads.length, readsAfterFirst, 'a parked session must not be re-read');
+  assert.equal(second.scope.reused, 2, 'both sessions carry over from the platform cache');
+});
+
 test('the durable rollup is keyed on the log, not on the file that holds it', async () => {
   const { mkdtemp, rm } = await import('node:fs/promises');
   const { tmpdir } = await import('node:os');

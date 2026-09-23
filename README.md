@@ -122,79 +122,103 @@ single scale: an extreme outlier would push every other day toward the floor.
 
 ## Performance and caching
 
-A refresh is answered from the platform's own numbers wherever it can be, and only
-falls back to reading a log when it must. Seven things keep a scan cheap, measured
-on a real 25-session / 42MB corpus:
+**The cost of a session log is its decode, and nothing else.** Measured on a real
+corpus (36 sessions, 190 known ids, one 14MB log):
+
+| operation | 14MB log | 5MB log |
+|---|---|---|
+| `persistence.open()` — the zstd decode | **1062ms** | 435ms |
+| `handle.read()` — parse the events | **16ms** | 14ms |
+| `foldSession` over 18151 events | **10ms** | — |
+| `open()` again, from the backend's memo | 6ms | 11ms |
+| `query.readSession` (validated: replays the log) | **11293ms** | 4456ms |
+
+So reading *less* of a log saves nothing — the decode is unavoidable and dominates by
+two orders of magnitude — while *never opening* one saves everything. Every policy
+below follows from that.
 
 * **The platform's `tokenUsage` projection is the first source.** `dsh-token-meter`
   registers a projection unit and `dsh-session-projection-cache` checkpoints it on
-  every turn boundary, so the harness has *already* folded and stored every
-  session's provider-reported totals. Reading them back is a Map lookup plus a
-  schema check against the listed header's lifecycle identity — no open, no stat,
-  no read.
-* **A marker is only computed when it can change the answer.** Deriving the
-  day/model split is the one thing the platform does not record, so it is the only
-  reason to read a log. When the platform's total for a session matches the one the
-  last split was reconciled against, the split is proven current and the session is
-  carried over without a `stat`, an `observeSession`, or a read. This matters most
-  for a live session: `observeSession` on the 13MB session being written cost 4.5s
-  on its own, paid on every refresh, purely to conclude that nothing had changed.
-* **Deriving splits is budgeted.** A cold corpus wants ~20s of log reading to place
-  every session on the calendar, which no panel open should wait for. A scan spends
-  at most `SPLIT_BUDGET_MS` (1s) deriving splits and defers the rest; deferred
-  sessions still report the platform's **exact total** under the unattributed key on
-  their creation day, and the following scan reads their log and replaces it. A
-  session parked that way records *which platform row* its placement came from, so
-  the next scan recognises it as already reconciled and does not read it again — that
-  bookkeeping is what a repeat refresh depends on, and getting it wrong meant the
-  same sessions re-entered the read queue on every refresh forever.
+  every turn boundary, so the harness has *already* folded and stored every session's
+  provider-reported totals. Reading them back is a Map lookup plus a schema check
+  against the listed header's lifecycle identity — no open, no stat, no read, and it
+  survives restarts.
+* **Nothing decodes a log on the request path.** A request is answered from state the
+  host already maintains. The first request a freshly booted host receives used to
+  *block* for the whole first scan — measured at 4014ms with a 4s listing and 9014ms
+  with a 9s one — which is exactly the moment a user is staring at it. It now answers
+  "warming up" at once and lets the panel poll.
+* **A scan pays for at most `MAX_DECODES_PER_SCAN` (2) decodes**, on top of a 1s
+  budget and a 20s ceiling. A time budget alone cannot bound this: it is checked
+  *before* a decode, and one cold decode (1062ms) is longer than the whole budget, so
+  a scan that read four sessions cost 7.4s in production. Counting decodes bounds the
+  worst case directly.
+* **A scan that leaves work behind queues the next round itself.** Bounding alone is
+  not enough: the residue would otherwise only advance when something asked for a
+  scan, and nothing does while the panel sits open inside its TTL. Measured on a real
+  cold start, the panel stayed at 8 of 15 days and 1 of 9 models indefinitely. Each
+  round is still bounded and nothing touches a request, so a cold corpus places itself
+  within a few seconds in the background.
+* **A parked session is revisited, and its total is right meanwhile.** A session a
+  scan had no budget for still reports the platform's **exact** total — under the
+  unattributed key, on the day it was created — so the lifetime figure is never a
+  placeholder. Only the calendar placement is, and the entry records that (`placed`)
+  so a later round comes back for it. Treating a parked entry as a finished split is
+  what made the partial heatmap permanent.
+* **Only a real split is carried over.** A split is proven current when the platform's
+  row for that session has not moved since it was derived: the log's usage content is
+  exactly what produced that row. That check costs one comparison and replaces the
+  `stat`/`observeSession` a marker used to need — which on the live session was
+  `observeSession` over a 13MB log, paid on every refresh to conclude that nothing had
+  changed.
+* **One open per session, not two.** The events and the inherited cut come back from
+  the same handle, because a second open on a cold memo is another full decode.
 * **A closed session is read through the persistence handle, not `readSession`.**
-  `sessionQuery.readSession` returns a *validated* snapshot: it replays the whole
-  log to prove it is well-formed, which is right before resuming a session and far
-  too much for counting four numbers per assistant message. Over the same corpus:
-  **29.9s through `readSession` against ~3.3s through `handle.read()`**, with
-  identical totals.
-* **Metadata change detection, keyed on the log rather than the file.** A closed
-  session's marker comes from `sessionPersistence.stat()`'s `eventCount`; `sizeBytes`
-  is only consulted when no count exists, because the byte size also moves when the
-  store re-compresses an unchanged log, and keying on it made every refresh re-read
-  every large session for nothing.
-* **A format migration does not discard cached totals.** The projection cache binds
-  a record to a session's format generation, so a harness upgrade that migrates
-  stored logs makes an exact-generation lookup miss every session it touched —
-  measured here: a v3→v4 migration silently cost 4 of 25 sessions their cached
-  totals. A row from the immediately preceding generation is read anyway, because
-  the generation governs how a log is *decoded*, not how many tokens it reports.
-* **A burst of Refresh presses costs one scan.** Pressing Refresh repeatedly is
-  normal while watching the numbers, and each press used to redo the whole pass —
-  which is never free, because it starts with `listSessions` (57–131ms) and then
-  visits every session. A press landing within `DEFAULT_REFRESH_FLOOR_MS` (600ms) of
-  a completed scan is answered from that scan and reported as neither stale nor
-  scanning, so the panel neither polls nor leaves its "Refreshing…" marker up. It is
-  a floor on re-scanning rather than a result cache, and it is opt-in: the plugin
-  sets it, while a direct caller of the core gets a guaranteed fresh scan unless it
-  asks otherwise.
+  `readSession` returns a *validated* snapshot: it replays the whole log to prove it is
+  well-formed, which is right before resuming a session and 8× too much here
+  (**11293ms against 1355ms** for the same 14MB log, identical totals).
+* **The durable state is not discarded for being old.** It used to expire after 24h,
+  which threw away every session's split — including the deleted sessions' history,
+  which exists nowhere else — and forced a fully cold re-derivation. Entries are
+  revalidated per session against the platform's own row instead, so age proves
+  nothing and expiry only destroyed work.
+* **The rollup's layout version is not a delete button.** Version 1 is still read:
+  the per-day and per-model contributions of sessions whose logs are *already gone*
+  cannot be re-derived from anything, so a version bump that discarded the file would
+  make the lifetime total shrink.
+* **A failed scan reports itself instead of leaving `stale` true forever.** A rejected
+  background scan used to be swallowed while `stale` was recomputed from the request,
+  so it stayed true and the panel polled for two minutes over a scan that had already
+  died — reported as "the refresh fails". The failure is now recorded, `stale` goes
+  false, the reason travels with the numbers, and a cooldown stops a retry storm.
+* **`listSessions` is bounded.** It is the only call in a scan that can hang, and
+  nothing else in the composition accepts an abort signal; a listing that never
+  settles used to leave the request pending forever.
+* **A burst of Refresh presses costs one scan.** A press landing within
+  `DEFAULT_REFRESH_FLOOR_MS` (600ms) of a completed scan is answered from that scan and
+  reported as neither stale nor scanning. It is a floor on re-scanning rather than a
+  result cache, and it is opt-in: a direct caller of the core gets a guaranteed fresh
+  scan unless it asks otherwise.
 * **The last aggregate is persisted alongside the rollup**, so the first panel open
-  after a host restart is answered from disk, and the scan hands the event loop back
-  between sessions so a request whose answer is already cached never waits behind a
-  whole pass.
+  after a host restart is answered from disk.
 
-Measured end to end on that corpus, through the plugin's own handler:
+Measured end to end on that corpus, through the plugin's own route:
 
 | | before | now |
 |---|---|---|
-| cold scan (no rollup, first boot) | 31.4s | **~0.3s steady, ~2.7s once** |
+| first refresh after boot, durable state missing | **blocked 4–9s** | **5ms**, warming, then placed in the background |
+| **pressing Refresh again** | **4–5s every press** | **5–10ms**, and `read 0` |
+| cold start, until every session is placed | ~20s of log reading | **~3s of bounded background rounds** |
 | restart, rollup on disk | 31.4s | **3ms** |
-| **pressing Refresh again** | **4–5s every press** | **~0.2s, and 0ms on every other press** |
-| panel open, aggregate cached | 66–83ms | **7–47ms** |
+| panel open, aggregate cached | 66–83ms | **5–47ms** |
 
-A refresh in the steady state does **no log reads at all** (`read 0, reused 26`); the
-remainder is one `listSessions`. In the steady state the displayed total is unchanged
-across presses, which is expected: the numbers only move when a session log grows.
+A refresh in the steady state does **no log decodes at all** (`read 0, reused 36`); the
+remainder is one `listSessions`. The displayed total is unchanged across presses, which
+is expected: it only moves when a session log grows.
 
-The totals are not an approximation of the platform's: a session's folded buckets
-are reconciled against its `tokenUsage` total, and across all 25 sessions the
-panel's grand total matched the platform's to **0.000%**.
+The totals are not an approximation of the platform's: a session's folded buckets are
+reconciled against its `tokenUsage` total, and across the corpus the panel's grand total
+matched the platform's to **0.000%**.
 
 A panel open is answered at once from one of three places: the 60-second aggregate
 cache, the persisted aggregate, or a `stale: true` answer that is refreshed *behind*

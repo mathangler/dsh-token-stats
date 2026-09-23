@@ -168,9 +168,29 @@ test('a successful call answers the value envelope with the payload', async () =
       ],
     }),
   };
-  const { res, parsed } = await call({}, { sessionQuery, cachePath: null });
+  // A cold host answers "warming up" at once instead of blocking the request for the
+  // whole scan, so the numbers arrive on a follow-up — exactly what the panel does.
+  // The mount is held open across both requests, because each fresh mount is a new
+  // handler with nothing in it.
+  const mounted = mount({ sessionQuery, cachePath: null });
+  const first = fakeResponse();
+  await mounted.route.handler(fakeRequest({}), first);
+  const firstParsed = JSON.parse(first.body);
+  assert.equal(first.statusCode, 200);
+  assert.equal(firstParsed.ok, true);
+  assert.equal(firstParsed.value.warming, true, 'the first answer must not wait for a scan');
+  let res = first;
+  let parsed = firstParsed;
+  for (let i = 0; i < 200 && parsed.value.warming === true; i += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+    res = fakeResponse();
+    await mounted.route.handler(fakeRequest({}), res);
+    parsed = JSON.parse(res.body);
+  }
+  mounted.dispose();
   assert.equal(res.statusCode, 200);
   assert.equal(parsed.ok, true);
+  assert.equal(parsed.value.warming, undefined, 'a follow-up carries the scan output');
   assert.equal(parsed.value.models.length, 1);
   assert.equal(parsed.value.models[0].key, 'prov/mod');
   assert.deepEqual(parsed.value.models[0].buckets, [10, 4, 1, 0]);

@@ -165,6 +165,15 @@ on a real 25-session / 42MB corpus:
   measured here: a v3→v4 migration silently cost 4 of 25 sessions their cached
   totals. A row from the immediately preceding generation is read anyway, because
   the generation governs how a log is *decoded*, not how many tokens it reports.
+* **A burst of Refresh presses costs one scan.** Pressing Refresh repeatedly is
+  normal while watching the numbers, and each press used to redo the whole pass —
+  which is never free, because it starts with `listSessions` (57–131ms) and then
+  visits every session. A press landing within `DEFAULT_REFRESH_FLOOR_MS` (600ms) of
+  a completed scan is answered from that scan and reported as neither stale nor
+  scanning, so the panel neither polls nor leaves its "Refreshing…" marker up. It is
+  a floor on re-scanning rather than a result cache, and it is opt-in: the plugin
+  sets it, while a direct caller of the core gets a guaranteed fresh scan unless it
+  asks otherwise.
 * **The last aggregate is persisted alongside the rollup**, so the first panel open
   after a host restart is answered from disk, and the scan hands the event loop back
   between sessions so a request whose answer is already cached never waits behind a
@@ -174,10 +183,14 @@ Measured end to end on that corpus, through the plugin's own handler:
 
 | | before | now |
 |---|---|---|
-| cold scan (no rollup, first boot) | 31.4s | **~1.2s** |
+| cold scan (no rollup, first boot) | 31.4s | **~0.3s steady, ~2.7s once** |
 | restart, rollup on disk | 31.4s | **3ms** |
-| **pressing Refresh again** | **4–5s** | **0.14–0.7s**, zero log reads |
+| **pressing Refresh again** | **4–5s every press** | **~0.2s, and 0ms on every other press** |
 | panel open, aggregate cached | 66–83ms | **7–47ms** |
+
+A refresh in the steady state does **no log reads at all** (`read 0, reused 26`); the
+remainder is one `listSessions`. In the steady state the displayed total is unchanged
+across presses, which is expected: the numbers only move when a session log grows.
 
 The totals are not an approximation of the platform's: a session's folded buckets
 are reconciled against its `tokenUsage` total, and across all 25 sessions the

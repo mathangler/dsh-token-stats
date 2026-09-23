@@ -580,6 +580,56 @@ async function settled(handlers, options = {}) {
 }
 
 /**
+ * Pressing Refresh repeatedly is normal — the numbers are being watched — and each
+ * press used to redo the whole pass, which starts with `listSessions` and then
+ * visits every session. On the corpus this was measured against that meant every
+ * single press cost 1-3s. A press landing just after a scan finished is now answered
+ * from that scan, so a burst costs one scan.
+ */
+test('a burst of refresh presses costs one scan', async () => {
+  const session = { header: { id: 's1', isSeeded: false }, inheritedEventCount: 0, events: sessionEvents('m', usage(4, 2, 0, 0), 1789000000000) };
+  const query = stubQuery([session]);
+  const handlers = createHandlers(
+    { get: () => undefined },
+    { sessionQuery: query, cachePath: null, aggregateTtlMs: 0, refreshFloorMs: 60_000 },
+  );
+
+  // The first press scans and settles; the ones right behind it must not.
+  const first = await settled(handlers, { force: true });
+  const readsAfterFirst = query.reads.length;
+  assert.equal(readsAfterFirst, 1, 'the first press scans once');
+
+  for (let i = 0; i < 5; i += 1) {
+    const press = await handlers.refresh({});
+    assert.equal(press.scanning, false, 'a press inside the floor starts no scan');
+    assert.equal(press.stale, false, 'and its numbers are not stale');
+    assert.equal(press.durationMs, first.durationMs, 'the answer is the scan that already ran');
+  }
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(query.reads.length, readsAfterFirst, 'a burst of presses reads nothing more');
+});
+
+test('outside the floor a press scans again', async () => {
+  const session = { header: { id: 's1', isSeeded: false }, inheritedEventCount: 0, events: sessionEvents('m', usage(4, 2, 0, 0), 1789000000000) };
+  const query = stubQuery([session]);
+  // A zero floor is what a direct caller gets: a press is always a real scan, so a
+  // caller that needs a guaranteed fresh answer is never silently served a cached
+  // one. This is the behaviour the other refresh tests rely on.
+  const handlers = createHandlers(
+    { get: () => undefined },
+    { sessionQuery: query, cachePath: null, aggregateTtlMs: 0, refreshFloorMs: 0 },
+  );
+  await handlers.refresh({});
+  assert.equal(query.reads.length, 1, 'the first press scans');
+  // With no floor the press is not answered from the scan that just ran: it is
+  // reported stale because a fresh scan is behind it. That scan may coalesce with
+  // one already in flight — concurrent callers share a pass on purpose — so the
+  // claim here is about the reported freshness, not a read count.
+  const press = await handlers.refresh({});
+  assert.equal(press.stale, true, 'a press past the floor is reported stale while it rescans');
+});
+
+/**
  * A sessionQuery stub whose sessions are reachable through `observeSession`,
  * like the real service.
  *

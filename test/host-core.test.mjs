@@ -607,11 +607,57 @@ test('the previous rollup version is read, not discarded, so the lifetime total 
   }
 });
 
-test('a listing that never settles fails the scan instead of hanging it', async () => {
+/**
+ * A listing that hangs must not hang the host — but it must not be reported as a
+ * *fault* either.
+ *
+ * Everything this module reports is held in memory, so a listing that fails says
+ * nothing about the numbers: it only means this round could not check which sessions
+ * changed. Treating it as a failed scan turned a CPU-starved host into a red
+ * "listing sessions timed out" error over figures that were perfectly good, which is
+ * exactly what a user reported. It is a skipped round: the held numbers are
+ * re-published with a note, and the round retries on its own.
+ */
+/**
+ * A failed re-read must not shrink the lifetime figure.
+ *
+ * The log is still there and its usage was already folded once, so a read that fails
+ * now says nothing about the session. Blanking the entry made the figure *drop* every
+ * time a re-read failed — the one thing this module must never do — and it was found
+ * because a test asserted the numbers survived a failure and they did not.
+ */
+test('a failed re-read keeps the last known contribution instead of dropping it', async () => {
+  const session = { header: { id: 's1', isSeeded: false }, inheritedEventCount: 0, events: sessionEvents('m', usage(100, 50, 0, 0), 1789000000000) };
+  const query = stubQuery([session]);
+  const handlers = createHandlers({ get: () => undefined }, { sessionQuery: query, cachePath: null, aggregateTtlMs: 60_000 });
+  const good = await settled(handlers);
+  assert.deepEqual(good.models[0].buckets, [100, 50, 0, 0]);
+  assert.equal(good.scope.failed, 0);
+
+  // The log grows, so it must be re-read — and that read fails.
+  session.events = session.events.concat([
+    { type: 'turn/start', time: 1789000001000, data: { turn: 2 } },
+    { type: 'step/start', time: 1789000001000, data: { step: 1 } },
+    assistant(1789000001000, 2, 1, 'prov', 'm', usage(6, 3, 0, 0)),
+  ]);
+  query.readSession = async () => { throw new Error('read exploded'); };
+
+  const after = await settled(handlers, { force: true });
+  assert.equal(after.scope.failed, 1, 'the failure is reported');
+  assert.equal(after.scope.failedSessions[0].id, 's1');
+  assert.deepEqual(
+    after.models[0].buckets,
+    [100, 50, 0, 0],
+    'the numbers this session was last known to contribute must survive the failure',
+  );
+  handlers.stop();
+});
+
+test('a listing that never settles skips the round instead of failing it', async () => {
   const query = stubQuery([{ header: { id: 's1', isSeeded: false }, inheritedEventCount: 0, events: sessionEvents('m', usage(4, 2, 0, 0), 1789000000000) }]);
   const handlers = createHandlers(
     { get: () => undefined },
-    { sessionQuery: query, cachePath: null, aggregateTtlMs: 60_000, listTimeoutMs: 30 },
+    { sessionQuery: query, cachePath: null, aggregateTtlMs: 60_000, listTimeoutMs: 30, degradedRetryMs: 5 },
   );
   await settled(handlers);
   // Now make the listing hang forever.
@@ -624,10 +670,40 @@ test('a listing that never settles fails the scan instead of hanging it', async 
     await new Promise((resolve) => setTimeout(resolve, 5));
     after = await handlers.summary({});
   }
-  assert.equal(after.scanning, false, 'the hung scan must stop claiming to be running');
+  assert.equal(after.scanning, false, 'the skipped round must stop claiming to be running');
   assert.equal(after.stale, false, 'and the panel must stop polling for it');
-  assert.match(after.error, /timed out/, 'the reason is reported');
-  assert.deepEqual(after.models[0].buckets, [4, 2, 0, 0], 'with the last good numbers still shown');
+  assert.equal(after.error, '', 'it is not a fault, so it is not shown as one');
+  assert.match(after.warning, /timed out/, 'the skipped round says why');
+  assert.deepEqual(after.models[0].buckets, [4, 2, 0, 0], 'with the held numbers still shown');
+  // Nothing was retired by guesswork: with no listing there is no way to tell a
+  // deleted session from an unlisted one, so the pass that would do it is skipped.
+  assert.equal(after.scope.retired, 0);
+  assert.equal(after.scope.sessions, 1, 'the session count falls back to what is held');
+  handlers.stop();
+});
+
+test('a scan that cannot list its sessions keeps serving the last numbers', async () => {
+  const query = stubQuery([{ header: { id: 's1', isSeeded: false }, inheritedEventCount: 0, events: sessionEvents('m', usage(4, 2, 0, 0), 1789000000000) }]);
+  const handlers = createHandlers(
+    { get: () => undefined },
+    { sessionQuery: query, cachePath: null, aggregateTtlMs: 60_000, degradedRetryMs: 5 },
+  );
+  await settled(handlers);
+  // A listing that throws outright is treated the same way: transient until proven
+  // otherwise, and never a reason to stop showing the numbers.
+  query.listSessions = async () => { throw new Error('listing exploded'); };
+  const press = await handlers.refresh({});
+  let after = press;
+  for (let i = 0; i < 200 && after.scanning === true; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    after = await handlers.summary({});
+  }
+  assert.equal(after.scanning, false);
+  assert.equal(after.stale, false, 'the previous numbers are the best answer there is');
+  assert.equal(after.error, '', 'a transient listing failure is not a panel error');
+  assert.match(after.warning, /listing exploded/);
+  assert.deepEqual(after.models[0].buckets, [4, 2, 0, 0]);
+  handlers.stop();
 });
 
 /**
@@ -718,11 +794,22 @@ test('a session log is opened once per scan, not twice', async () => {
   assert.equal(opens, 1, 'the log is opened once, for both its events and its inherited cut');
 });
 
+/**
+ * The sticky-stale failure, which is what "the refresh fails" turned out to be.
+ *
+ * A rejected background scan used to be swallowed while `stale` was recomputed from
+ * the request, so it stayed true and the panel polled for ~120s over a scan that had
+ * already died. Whatever the cause, the round must end: no claim of work in flight, no
+ * permanent staleness, and the last numbers still served.
+ */
 test('a scan that fails stops reporting itself instead of spinning forever', async () => {
   const query = stubQuery([{ header: { id: 's1', isSeeded: false }, inheritedEventCount: 0, events: sessionEvents('m', usage(4, 2, 0, 0), 1789000000000) }]);
-  const handlers = createHandlers({ get: () => undefined }, { sessionQuery: query, cachePath: null, aggregateTtlMs: 60000 });
+  const handlers = createHandlers({ get: () => undefined }, { sessionQuery: query, cachePath: null, aggregateTtlMs: 60000, degradedRetryMs: 5 });
   await settled(handlers);
-  query.listSessions = async () => { throw new Error('listing exploded'); };
+  // Force a real re-read (the marker must move), and make that read fail.
+  query.listSessions = async () => [{ header: { id: 's1', isSeeded: false }, live: false, persisted: true }];
+  query.listEvents = async () => [{ seq: 0 }, { seq: 1 }];
+  query.readSession = async () => { throw new Error('read exploded'); };
   const forced = await handlers.refresh({});
   assert.equal(forced.scanning, true);
   let after = await handlers.summary({});
@@ -732,8 +819,157 @@ test('a scan that fails stops reporting itself instead of spinning forever', asy
   }
   assert.equal(after.scanning, false, 'a failed scan must stop claiming to be running');
   assert.equal(after.stale, false, 'and the previous numbers are the best answer there is');
-  assert.equal(after.error, 'Error: listing exploded', 'the panel is told why, instead of polling for a scan that died');
+  // The read failure is contained to its session: named, counted, and the round still
+  // produced an answer rather than dying.
+  assert.equal(after.scope.failed, 1, 'the unreadable session is reported, not swallowed');
+  assert.equal(after.scope.failedSessions[0].id, 's1');
+  assert.equal(after.scope.failedSessions[0].error, 'Error: read exploded');
   assert.deepEqual(after.models[0].buckets, [4, 2, 0, 0]);
+  handlers.stop();
+});
+
+/**
+ * The requirement, stated exactly: keep every day of history, including for sessions
+ * that have since been deleted, stored per day.
+ *
+ * The day dimension is the one thing that cannot be recovered later — a deleted
+ * session's log is gone, so if its usage was never attributed to the days it happened
+ * on, no later scan can put it there. So a deleted session's entry must survive with
+ * its own per-day, per-model detail intact, and there must be no window or age that
+ * discards it. Merging removed sessions into one lumped total is exactly what would
+ * lose this: a merged total has no day to sit on.
+ */
+test('a deleted session keeps its usage on the exact days it happened, however old', async () => {
+  const live = 1789000000000;                    // 2026-09-23
+  const week = live - 7 * 86400000;              // a week earlier
+  const year = live - 400 * 86400000;            // more than a year earlier
+  const sessions = [
+    { header: { id: 'gone-recent', isSeeded: false, createdAt: week }, inheritedEventCount: 0, events: sessionEvents('recent/m', usage(100, 50, 0, 0), week) },
+    { header: { id: 'gone-ancient', isSeeded: false, createdAt: year }, inheritedEventCount: 0, events: sessionEvents('ancient/m', usage(7, 3, 0, 0), year) },
+    { header: { id: 'alive', isSeeded: false, createdAt: live }, inheritedEventCount: 0, events: sessionEvents('live/m', usage(4, 2, 0, 0), live) },
+  ];
+  const query = {
+    listSessions: async () => sessions.map((entry) => ({ header: entry.header, live: false, persisted: true })),
+    listEvents: async (id) => (sessions.find((s) => s.header.id === id)?.events ?? []).map((event, index) => ({ seq: index, type: event.type, time: event.time })),
+    readSession: async (id) => {
+      const entry = sessions.find((s) => s.header.id === id);
+      return { session: entry.header, inheritedEventCount: 0, events: entry.events };
+    },
+  };
+  // A generous decode budget so one round places all three: this test is about what is
+  // *kept*, not about how the budget spreads work out. (The budget's own interaction
+  // with retention is covered separately — a session deleted before its split was ever
+  // derived genuinely has no days, which is why a first-seen session is folded at once.)
+  const handlers = createHandlers(
+    { get: () => undefined },
+    { sessionQuery: query, cachePath: null, aggregateTtlMs: 60_000, maxDecodesPerScan: 20 },
+  );
+  const before = await settled(handlers, { force: true });
+  assert.equal(before.scope.pending, 0, 'every session is placed before any of them is deleted');
+  assert.equal(before.scope.failed, 0);
+
+  // Two of the three are deleted. Nothing can re-derive what they contributed.
+  sessions.splice(0, 2);
+  const after = await settled(handlers, { force: true });
+  assert.equal(after.scope.retired, 2, 'both removed sessions are kept, not dropped');
+
+  const byDay = new Map(after.days.map((day) => [day.d, day.b]));
+  assert.deepEqual(byDay.get(localDayKey(week)), [100, 50, 0, 0], 'a deleted session still sits on its own day');
+  assert.deepEqual(
+    byDay.get(localDayKey(year)),
+    [7, 3, 0, 0],
+    'and a day over a year old is kept too — there is no window and no expiry',
+  );
+  assert.deepEqual(byDay.get(localDayKey(live)), [4, 2, 0, 0], 'the surviving session is unaffected');
+
+  const models = new Map(after.models.map((model) => [model.key, model.buckets]));
+  assert.deepEqual(models.get('prov/recent/m'), [100, 50, 0, 0], 'and its model attribution survives, per day');
+  assert.deepEqual(models.get('prov/ancient/m'), [7, 3, 0, 0]);
+  handlers.stop();
+});
+
+/**
+ * A session that appears *now* must be placed *now*, whatever the budget says.
+ *
+ * The day dimension cannot be recovered: once a log is gone nothing can say which days
+ * its tokens were spent on. So a budget that parks a newly appeared session can lose
+ * that session's days permanently if it is deleted before the next round reaches it.
+ * A new session is also the cheapest case to fold, since its log is still tiny.
+ */
+test('a session created while the host is running is folded whatever the budget says', async () => {
+  const big = { header: { id: 'big', isSeeded: false }, inheritedEventCount: 0, events: sessionEvents('m', usage(100, 10, 0, 0), 1789000000000) };
+  const sessions = [big];
+  const query = {
+    listSessions: async () => sessions.map((entry) => ({ header: entry.header, live: false, persisted: true })),
+    listEvents: async (id) => (sessions.find((s) => s.header.id === id)?.events ?? []).map((event, index) => ({ seq: index, type: event.type, time: event.time })),
+    readSession: async (id) => {
+      const entry = sessions.find((s) => s.header.id === id);
+      return { session: entry.header, inheritedEventCount: 0, events: entry.events };
+    },
+  };
+  // A budget of zero decodes: on a cold scan nothing is placed, which is the point.
+  const handlers = createHandlers(
+    { get: () => undefined },
+    { sessionQuery: query, cachePath: null, aggregateTtlMs: 60_000, maxDecodesPerScan: 0 },
+  );
+  const cold = await settled(handlers);
+  assert.equal(cold.scope.read, 0, 'the budget is respected on a cold scan');
+  assert.equal(cold.scope.eager, 0, 'and nothing is exempt while the corpus is still unknown');
+
+  // A new session appears while the host is running. It must be placed immediately.
+  sessions.push({ header: { id: 'fresh', isSeeded: false }, inheritedEventCount: 0, events: sessionEvents('fresh/m', usage(5, 1, 0, 0), 1789000100000) });
+  const after = await settled(handlers, { force: true });
+  assert.equal(after.scope.eager, 1, 'the newly seen session is folded without regard to the budget');
+  assert.equal(after.scope.read, 1);
+  assert.deepEqual(
+    after.models.find((model) => model.key === 'prov/fresh/m').buckets,
+    [5, 1, 0, 0],
+    'so its days exist from the moment it appears, and survive it being deleted',
+  );
+  handlers.stop();
+});
+
+
+/**
+ * The stored `tokenUsage` row is read directly, because no wire view serves it.
+ *
+ * `viewCheckpoint` only serves units that declare a `wire` view, and `tokenUsage`
+ * declares none — verified in the installed source — so the plugin's platform-total
+ * source silently yielded nothing. The row is still stored (`{ver, seq, val}` with
+ * `val = {totals, last}`), so it is read from there. Without this, a session whose log
+ * cannot be read contributes nothing at all even though the platform can still account
+ * for it, which is the one failure a lifetime figure must not have.
+ */
+test('a session whose log cannot be read is still counted, from its stored row', async () => {
+  const header = { id: 's1', isSeeded: false, version: 5, createdAt: 1789000000000 };
+  const query = stubQuery([{ header, inheritedEventCount: 0, events: sessionEvents('m', usage(4, 2, 0, 0), 1789000000000) }]);
+  // No marker available, so the log is unreachable and only the row can answer.
+  query.listEvents = async () => { throw new Error('log unreadable'); };
+  const projectionCache = {
+    // The service's record read. (Its public `cachedSnapshot` is built on the same
+    // wire-gated `viewCheckpoint`, so it cannot serve `tokenUsage` either — which is
+    // why the row is parsed rather than viewed.)
+    recordFor: () => ({
+      identity: { formatVersion: 5 },
+      rows: {
+        tokenUsage: { ver: 2, seq: 42, val: { totals: { uncachedInputTokens: 700, outputTokens: 70, cacheReadTokens: 7000, cacheWriteTokens: 0 }, last: null } },
+      },
+    }),
+  };
+  // A registry whose wire-gated view serves nothing for this key, as the real one does.
+  const projections = { viewCheckpoint: () => ({}) };
+  const handlers = createHandlers(
+    { get: () => undefined },
+    { sessionQuery: query, sessionProjectionCache: projectionCache, sessionProjections: projections, cachePath: null, aggregateTtlMs: 60_000 },
+  );
+  const payload = await settled(handlers);
+  assert.deepEqual(
+    payload.models.find((model) => model.key === UNKNOWN_MODEL_KEY)?.buckets,
+    [700, 70, 7000, 0],
+    'the platform total is accounted for rather than dropped',
+  );
+  assert.equal(payload.scope.failed, 0, 'and the session is not reported as a failure either');
+  handlers.stop();
 });
 
 test('sessions removed from the listing keep counting unless retention is off', async () => {

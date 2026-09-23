@@ -137,12 +137,18 @@ So reading *less* of a log saves nothing — the decode is unavoidable and domin
 two orders of magnitude — while *never opening* one saves everything. Every policy
 below follows from that.
 
-* **The platform's `tokenUsage` projection is the first source.** `dsh-token-meter`
-  registers a projection unit and `dsh-session-projection-cache` checkpoints it on
-  every turn boundary, so the harness has *already* folded and stored every session's
-  provider-reported totals. Reading them back is a Map lookup plus a schema check
-  against the listed header's lifecycle identity — no open, no stat, no read, and it
-  survives restarts.
+* **The platform's `tokenUsage` projection is the first source** — but not through its
+  *view*. `dsh-token-meter` registers a projection unit and
+  `dsh-session-projection-cache` checkpoints it on every turn boundary, so the harness
+  has *already* folded and stored every session's provider-reported totals. Reading
+  that value back through the registry's supported route does not work, though:
+  `viewCheckpoint` (and `cachedSnapshot`, which is built on it) serve only units that
+  declare a `wire` view, and `tokenUsage` declares none — measured, they return nothing
+  for this key while the row sits on disk complete. The stored row is a documented
+  `ProjectionCheckpointRow` (`{ ver, seq, val }`, `val` being `{ totals, last }`), so the
+  totals are read from it directly and shape-checked. That is what lets a session whose
+  log cannot be read still be counted at its platform total instead of vanishing from a
+  "lifetime" figure the platform can still account for.
 * **Nothing decodes a log on the request path.** A request is answered from state the
   host already maintains. The first request a freshly booted host receives used to
   *block* for the whole first scan — measured at 4014ms with a 4s listing and 9014ms
@@ -203,7 +209,6 @@ below follows from that.
   after a host restart is answered from disk.
 
 Measured end to end on that corpus, through the plugin's own route:
-
 | | before | now |
 |---|---|---|
 | first refresh after boot, durable state missing | **blocked 4–9s** | **5ms**, warming, then placed in the background |
@@ -220,10 +225,45 @@ The totals are not an approximation of the platform's: a session's folded bucket
 reconciled against its `tokenUsage` total, and across the corpus the panel's grand total
 matched the platform's to **0.000%**.
 
+## What "exact" is checked against
+
+The figure is verified against the platform's own stored totals, independently of this
+plugin's bookkeeping. On the corpus measured here:
+
+| check | result |
+|---|---|
+| each session's independent fold vs the platform's stored total | **37 of 37 match**, 0 mismatches |
+| every session's fold, summed, vs the platform's store | 3381.151M vs 3381.263M |
+| the payload's per-day sum vs its per-model sum | **identical** — nothing double-counted |
+| `failed` / `pending` / `retired` | **0 / 0 / 0** — nothing unaccounted for |
+
+The remaining 0.113M is a platform record for a session deleted **before this host ever
+saw it**: the platform keeps its total, but no listing mentions it and no log exists to
+say which days it was spent on. It is deliberately not invented onto a day — an
+unattributable number placed on a guessed date would corrupt the calendar to flatter the
+total. A session this plugin *has* seen keeps its per-day history for exactly this
+reason, and that history is never merged, expired, or dropped:
+
+* A session removed from the listing keeps its own per-day, per-model entry — including
+  days over a year old. Nothing is folded into a lumped "deleted sessions" total, because
+  a lumped total has no day to sit on: merging is what would make days vanish from the
+  heatmap.
+* A session whose log cannot be read keeps the contribution it was last known to have
+  rather than being blanked. Blanking made the figure *shrink* on a failed re-read.
+* A session that appears while the host is running is folded **at once**, whatever the
+  decode budget says — a new session's log is tiny, and its days are the one thing that
+  cannot be recovered later if it is deleted. Only a backlog that already existed when
+  the host started is spread across rounds.
+* The durable state has no expiry, and the rollup's layout version is not a delete
+  button, so an upgrade cannot cost history.
+
 A panel open is answered at once from one of three places: the 60-second aggregate
 cache, the persisted aggregate, or a `stale: true` answer that is refreshed *behind*
 the response while the panel revalidates and shows a quiet "Refreshing…" hint. An
-explicit refresh rescans the same way.
+explicit refresh rescans the same way. A round that could not list its sessions (a busy
+host) is *skipped*, not failed: the held numbers are re-published with a quiet note and
+the round retries itself, because nothing about a starved process says anything about
+the numbers.
 
 The panel measures its chart slot from the ref callback that attaches it — not
 from an effect, because on a cold open the slot does not exist yet when effects

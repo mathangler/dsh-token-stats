@@ -1095,4 +1095,19 @@ test('the panel shows a pager only when history is longer than one window', () =
   const today = dayKeyBack(0);
   const windowStart = __test.dayKeyOf(__test.addDays(new Date(), -(new Date().getDay() + 6) % 7 - 7 * (__test.heatmapWeeks() - 1)));
   assert.equal(shown, windowStart + ' \u2192 ' + today, 'the label must state the window on screen, saw ' + shown);
+
+  // History that stops well before the current window leaves the newest page empty.
+  // The view then sits on the only window that holds usage, and the control must still
+  // be there: its label is the only thing on screen saying which period is shown.
+  const staleOnly = panelFor([{ d: dayKeyBack(400), b: [4, 1, 0, 0], m: [[0, 4, 1, 0, 0]] }]);
+  assert.equal(staleOnly.pager.length, 1, 'a lone older window still needs the control');
+  assert.equal(staleOnly.range.length, 1, 'and its label, because the grid no longer ends today');
+  // The label states the window's two ends, so the day it holds sits between them.
+  const [staleFrom, staleTo] = String(staleOnly.range[0].children).split(' \u2192 ');
+  assert.ok(dayKeyBack(400) >= staleFrom && dayKeyBack(400) <= staleTo,
+    'the label must cover the window holding the data, saw ' + staleFrom + '..' + staleTo);
+  assert.ok(staleTo < dayKeyBack(0), 'and must not claim to end today');
+  const [staleBack, staleForward] = staleOnly.arrows;
+  assert.equal(staleBack.props.disabled, true, 'nothing older than that window holds usage');
+  assert.equal(staleForward.props.disabled, true, 'and nothing newer does either, so neither arrow leads anywhere');
 });

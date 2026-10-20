@@ -27,8 +27,13 @@ An arrow is offered **only when there is usage in that direction**, and it is di
 rather than removed when there is not, so the control neither moves under the pointer
 nor hides the fact that history exists. Paging skips stretches that hold no usage under
 the current metric instead of stepping through blank windows, and it is computed from
-the data itself, so it never lands on an empty page. When everything fits in one window
-the pager is not shown at all.
+the data itself, so it never lands on an empty page.
+
+The control is hidden while one window covers all of history — there the grid is always
+"the last eighteen weeks ending today", so a permanently dead pair of arrows would only
+add noise. It does appear when the view is sitting on an older window even if that is
+the only one holding data (history that stops months ago leaves the newest window
+empty), because then the label is the only thing on screen saying which period is shown.
 
 One range control drives **both** the trend and the share chart — they share a
 single card, so the scope is stated once.

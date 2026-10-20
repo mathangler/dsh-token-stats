@@ -1051,7 +1051,7 @@ test('a page moves both day-scale views to the same older window', () => {
   }
 });
 
-test('the panel shows a pager only when history is longer than one window', () => {
+test('the panel always shows the pager, dimmed when there is nowhere to go', () => {
   const { __test } = loadClient().mod;
   const panelFor = (days) => {
     const Panel = __test.createPanel({}, { translate: (key) => (__test.ZH[key] === undefined ? key : __test.ZH[key]), subscribeLocale: () => () => {} });
@@ -1071,10 +1071,20 @@ test('the panel shows a pager only when history is longer than one window', () =
     };
   };
 
-  // Everything inside one window: no pager at all, so a dead control cannot be shown.
+  // Everything inside one window: the control is still there so the feature is
+  // discoverable before there is anything to page through, and so the grid always
+  // states the period it covers — but neither arrow leads anywhere, and both say so.
   const recentOnly = panelFor([{ d: dayKeyBack(3), b: [10, 1, 0, 0], m: [[0, 10, 1, 0, 0]] }]);
-  assert.equal(recentOnly.pager.length, 0, 'a corpus that fits one window must not offer paging');
-  assert.equal(recentOnly.arrows.length, 0);
+  assert.equal(recentOnly.pager.length, 1, 'the control must be visible even with nothing to page to');
+  assert.equal(recentOnly.arrows.length, 2, 'both arrows are present, dimmed rather than removed');
+  assert.equal(recentOnly.range.length, 1, 'and the label still states the period on screen');
+  assert.equal(recentOnly.arrows[0].props.disabled, true, 'nothing older exists');
+  assert.equal(recentOnly.arrows[1].props.disabled, true, 'and nothing newer either');
+  assert.equal(
+    String(recentOnly.range[0].children),
+    __test.dayKeyOf(__test.addDays(new Date(), -(new Date().getDay() + 6) % 7 - 7 * (__test.heatmapWeeks() - 1))) + ' \u2192 ' + dayKeyBack(0),
+    'with one window of history the label is still the plain last window',
+  );
 
   // History older than the window: two arrows, and the back arrow is the live one.
   const withHistory = panelFor([

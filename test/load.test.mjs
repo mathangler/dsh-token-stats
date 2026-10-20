@@ -910,3 +910,189 @@ test('range presets are anchored on today, not on the last recorded day', () => 
   const all = __test.presetRange('all', { first: '2026-01-01', last: '2026-02-01' });
   assert.deepEqual(all, { from: '2026-01-01', to: '2026-02-01' });
 });
+
+/** `YYYY-MM-DD` for a day `back` days before today, in local time. */
+function dayKeyBack(back) {
+  const now = new Date();
+  const day = new Date(now.getFullYear(), now.getMonth(), now.getDate() - back);
+  const pad = (n) => String(n).padStart(2, '0');
+  return day.getFullYear() + '-' + pad(day.getMonth() + 1) + '-' + pad(day.getDate());
+}
+
+/** Walk a rendered tree. */
+function collectAll(node, out = []) {
+  if (node === null || node === undefined || typeof node !== 'object') return out;
+  if (Array.isArray(node)) { for (const child of node) collectAll(child, out); return out; }
+  out.push(node);
+  collectAll(node.children, out);
+  return out;
+}
+
+/** A cell's day key from a rendered heatmap, using the key the component gave it. */
+const cellEntry = (node) => ({ key: node.props.key, on: String(node.props.className).includes('dts-cell-on') });
+
+/**
+ * The day-scale window can move through history.
+ *
+ * The grid is a fixed-length window, which is what stops it wandering on a wide
+ * screen — but it also means anything older than the window is unreachable unless the
+ * window can be pointed at it. These are the three properties that matter: pages exist
+ * only where there is usage, a page actually moves the window, and both views agree on
+ * where a page starts.
+ */
+test('the pager lists only the windows that hold usage', () => {
+  const { __test } = loadClient().mod;
+  const recent = dayKeyBack(3);
+  const older = dayKeyBack(200);
+  const olderKey = dayKeyBack(400);
+  const payload = {
+    generatedAt: 0,
+    scope: { sessions: 1, failed: 0, retired: 0, seeded: 0 },
+    models: [{ key: 'p/m', provider: 'p', model: 'm', name: 'M', buckets: [100, 1, 0, 0] }],
+    days: [
+      // Oldest first, as the host sends them.
+      { d: olderKey, b: [40, 0, 0, 0], m: [[0, 40, 0, 0, 0]] },
+      { d: older, b: [5, 0, 0, 0], m: [[0, 5, 0, 0, 0]] },
+      { d: recent, b: [100, 1, 0, 0], m: [[0, 100, 1, 0, 0]] },
+    ],
+    range: { first: olderKey, last: recent },
+  };
+  const model = __test.prepare(payload);
+  const pager = __test.pagerFor(model, 'all');
+
+  assert.equal(pager.pages[0], 0, 'the newest window is always a page');
+  assert.ok(pager.pages.length >= 3, 'each stretch of usage must be reachable, saw ' + pager.pages.join(','));
+  assert.deepEqual([...pager.pages].sort((a, b) => a - b), pager.pages, 'pages must ascend');
+  assert.equal(pager.pageDays, __test.heatmapWeeks() * 7, 'a page is exactly one window long');
+
+  // Only pages with usage are offered: walking every page from 0 to the last one, each
+  // must contain at least one day that holds usage under this metric.
+  const withUsage = new Set();
+  for (const day of model.days) {
+    if (__test.metricOf(day.b, 'all') <= 0) continue;
+    const back = __test.dayDiff(__test.dayKeyOf(pager.start), day.d);
+    withUsage.add(back >= 0 ? 0 : Math.ceil(-back / pager.pageDays));
+  }
+  assert.deepEqual(pager.pages, [...withUsage].sort((a, b) => a - b), 'an empty window must not be offered');
+  assert.ok(pager.pages.every((entry) => withUsage.has(entry)));
+
+  // A metric that no older day carries must not keep those pages alive.
+  const byOutput = __test.pagerFor(model, 'output');
+  assert.deepEqual(byOutput.pages, [0], 'a page with no usage under this metric is not offered');
+
+  // dayDiff is DST-safe: whole days only.
+  assert.equal(__test.dayDiff('2026-03-01', '2026-04-01'), 31);
+  assert.equal(__test.dayDiff('2026-04-01', '2026-03-01'), -31);
+});
+
+test('a page moves both day-scale views to the same older window', () => {
+  const { __test } = loadClient().mod;
+  const t = (key) => (__test.ZH[key] === undefined ? key : __test.ZH[key]);
+  const recent = dayKeyBack(3);
+  const older = dayKeyBack(200);
+  const payload = {
+    generatedAt: 0,
+    scope: { sessions: 1, failed: 0, retired: 0, seeded: 0 },
+    models: [{ key: 'p/m', provider: 'p', model: 'm', name: 'M', buckets: [100, 1, 0, 0] }],
+    days: [
+      { d: older, b: [5, 0, 0, 0], m: [[0, 5, 0, 0, 0]] },
+      { d: recent, b: [100, 1, 0, 0], m: [[0, 100, 1, 0, 0]] },
+    ],
+    range: { first: older, last: recent },
+  };
+  const model = __test.prepare(payload);
+  const pager = __test.pagerFor(model, 'all');
+  const page = pager.pages.find((entry) => entry > 0);
+  assert.ok(page !== undefined, 'the older day must have its own page');
+  const pageStart = __test.addDays(pager.start, -pager.pageDays * page);
+
+  const cellsOf = (tree) => collectAll(tree).filter((node) => typeof node.props.className === 'string'
+    && node.props.className.split(' ').includes('dts-cell')
+    && typeof node.props.key === 'string').map(cellEntry);
+
+  // The newest window shows the recent day only; the older page shows the old one only,
+  // and both keep the same number of days so the grid is the same shape.
+  const newest = cellsOf(__test.components.Heatmap({ t, model, metric: 'all' }));
+  const moved = cellsOf(__test.components.Heatmap({ t, model, metric: 'all', startDate: pageStart }));
+  assert.equal(newest.length, __test.heatmapWeeks() * 7);
+  assert.equal(moved.length, newest.length, 'a page must not change the window length');
+  assert.ok(newest.find((cell) => cell.key === recent).on, 'the recent day is lit in the newest window');
+  assert.ok(!newest.some((cell) => cell.key === older), 'the old day is outside the newest window');
+  assert.ok(moved.find((cell) => cell.key === older).on, 'the old day is lit on its own page');
+  assert.ok(!moved.some((cell) => cell.key === recent), 'the recent day is outside the older page');
+
+  // The bars follow the same start, so week i still sits under heatmap column i.
+  const barsOf = (tree) => collectAll(tree).filter((node) => node.type === 'rect'
+    && typeof node.props.className === 'string' && node.props.className.includes('dts-week-bar'));
+  const barsNewest = barsOf(__test.components.WeeklyBars({ t, model, metric: 'all' }));
+  const barsMoved = barsOf(__test.components.WeeklyBars({ t, model, metric: 'all', startDate: pageStart }));
+  assert.equal(barsNewest.length, __test.heatmapWeeks(), 'one bar per week');
+  assert.equal(barsMoved.length, barsNewest.length, 'the same window length on every page');
+  const heightOf = (bar) => Number(bar.props.height);
+  const litIndex = (bars) => bars.findIndex((bar) => heightOf(bar) > 0);
+  const newestIndex = litIndex(barsNewest);
+  const movedIndex = litIndex(barsMoved);
+  assert.ok(newestIndex >= 0, 'the newest window must draw a bar for the week that holds usage');
+  assert.ok(movedIndex >= 0, 'the older page must draw a bar for the week that holds usage');
+  assert.equal(barsNewest.filter((bar) => heightOf(bar) > 0).length, 1, 'only the week with usage draws a bar');
+  assert.equal(barsMoved.filter((bar) => heightOf(bar) > 0).length, 1);
+  assert.notEqual(newestIndex, movedIndex, 'the two windows must place that week at different columns');
+  // And the bar it drew is the week the day actually falls in, which is the property
+  // that keeps the bars under the right heatmap columns instead of merely looking right.
+  for (const [bars, start, index, dayKey] of [
+    [barsNewest, pager.start, newestIndex, recent],
+    [barsMoved, pageStart, movedIndex, older],
+  ]) {
+    const weekStart = __test.dayKeyOf(__test.addDays(start, 7 * index));
+    const weekEnd = __test.dayKeyOf(__test.addDays(start, 7 * index + 6));
+    assert.ok(dayKey >= weekStart && dayKey <= weekEnd,
+      'the lit bar must be the week holding ' + dayKey + ', got ' + weekStart + '..' + weekEnd);
+    assert.ok(bars.length > index);
+  }
+});
+
+test('the panel shows a pager only when history is longer than one window', () => {
+  const { __test } = loadClient().mod;
+  const panelFor = (days) => {
+    const Panel = __test.createPanel({}, { translate: (key) => (__test.ZH[key] === undefined ? key : __test.ZH[key]), subscribeLocale: () => () => {} });
+    __test.seedPayload({
+      generatedAt: 0,
+      scope: { sessions: 1, failed: 0, retired: 0, seeded: 0 },
+      models: [{ key: 'p/m', provider: 'p', model: 'm', name: 'M', buckets: [100, 1, 0, 0] }],
+      days,
+      range: { first: days[0].d, last: days[days.length - 1].d },
+    });
+    const tree = Panel();
+    const rows = collectAll(tree);
+    return {
+      pager: rows.filter((node) => typeof node.props.className === 'string' && node.props.className.split(' ').includes('dts-pager')),
+      arrows: rows.filter((node) => typeof node.props.className === 'string' && node.props.className.split(' ').includes('dts-page-btn')),
+      range: rows.filter((node) => typeof node.props.className === 'string' && node.props.className.split(' ').includes('dts-page-range')),
+    };
+  };
+
+  // Everything inside one window: no pager at all, so a dead control cannot be shown.
+  const recentOnly = panelFor([{ d: dayKeyBack(3), b: [10, 1, 0, 0], m: [[0, 10, 1, 0, 0]] }]);
+  assert.equal(recentOnly.pager.length, 0, 'a corpus that fits one window must not offer paging');
+  assert.equal(recentOnly.arrows.length, 0);
+
+  // History older than the window: two arrows, and the back arrow is the live one.
+  const withHistory = panelFor([
+    { d: dayKeyBack(200), b: [5, 0, 0, 0], m: [[0, 5, 0, 0, 0]] },
+    { d: dayKeyBack(3), b: [10, 1, 0, 0], m: [[0, 10, 1, 0, 0]] },
+  ]);
+  assert.equal(withHistory.pager.length, 1, 'history beyond the window must offer paging');
+  assert.equal(withHistory.arrows.length, 2, 'one arrow per direction');
+  assert.equal(withHistory.range.length, 1, 'the pager must state which stretch is on screen');
+  const [back, forward] = withHistory.arrows;
+  assert.equal(back.props.disabled, false, 'there is older usage, so back is offered');
+  assert.equal(forward.props.disabled, true, 'the newest window is where it starts, so forward is not');
+  assert.equal(back.props['aria-label'], __test.ZH.olderUsage);
+  assert.equal(forward.props['aria-label'], __test.ZH.newerUsage);
+  // The label names the window actually on screen: the newest one ends today, and
+  // starts one whole window earlier.
+  const shown = String(withHistory.range[0].children);
+  const today = dayKeyBack(0);
+  const windowStart = __test.dayKeyOf(__test.addDays(new Date(), -(new Date().getDay() + 6) % 7 - 7 * (__test.heatmapWeeks() - 1)));
+  assert.equal(shown, windowStart + ' \u2192 ' + today, 'the label must state the window on screen, saw ' + shown);
+});

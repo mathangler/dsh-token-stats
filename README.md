@@ -10,10 +10,25 @@ the numbers you would otherwise have to guess at.
 | Block | What it is |
 |---|---|
 | Dashboard | Six figures: lifetime tokens, peak day (with its date), today, last 7 days, daily average (per active day), and the cache-read share of all tokens |
-| Daily | A GitHub-style contribution heatmap, always ending today: a **fixed eighteen weeks** of 26px squares, centred in the card. The window is deliberately not derived from the card width — that made the block grow on a wide screen and squeeze every square on a narrow one — so a card narrower than the block shaves the cells just enough to hold all eighteen columns. Colour depth is continuous (see below). Days that have not happened yet keep a dashed slot |
+| Daily | A GitHub-style contribution heatmap: a **fixed eighteen weeks** of 26px squares, centred in the card, ending today. The window is deliberately not derived from the card width — that made the block grow on a wide screen and squeeze every square on a narrow one — so a card narrower than the block shaves the cells just enough to hold all eighteen columns. Colour depth is continuous (see below). Days that have not happened yet keep a dashed slot |
 | Weekly | One bar per week over the **same block**: same window, column pitch, width and height, aligned column-for-column, with each bar inset inside its column so consecutive weeks read as separate bars |
 | Trend | One smooth line per model over the selected range. The axis granularity follows the range: day up to a month, week up to six months, month up to two years, year beyond |
 | Share | A ring chart of per-model usage in the selected range, with a named legend and the range total in the middle |
+
+### Paging through older history
+
+The day-scale block holds one fixed window, so the window can be moved: the two
+arrows beside the section title step it back and forward a whole window at a time,
+and the label between them states which stretch is on screen. Both the daily grid and
+the weekly bars move together — they are one block seen two ways, so a page is a page
+for whichever view is selected.
+
+An arrow is offered **only when there is usage in that direction**, and it is dimmed
+rather than removed when there is not, so the control neither moves under the pointer
+nor hides the fact that history exists. Paging skips stretches that hold no usage under
+the current metric instead of stepping through blank windows, and it is computed from
+the data itself, so it never lands on an empty page. When everything fits in one window
+the pager is not shown at all.
 
 One range control drives **both** the trend and the share chart — they share a
 single card, so the scope is stated once.

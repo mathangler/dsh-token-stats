@@ -70,7 +70,9 @@ The plugin's own entry in the plugin inventory does too — `locale/en.json` and
 `locale/zh.json` carry its title and description, which the harness reads from the
 exported resources without activating the plugin, so the row is translated even
 while the plugin is disabled. `locale/zh.json` matches the `zh` preference this
-profile sets; the English file is also the fallback for any other language.
+profile sets; the English file is also the fallback for any other language. Its
+icon follows the same 36×36 gradient tile and white line art as the other plugins
+in this profile, drawn as a contribution grid — the thing the plugin exists to draw.
 
 A refresh answers immediately and keeps the numbers on screen while the rescan
 runs behind it. A harness whose `sessionQuery` offers `observeSession` reads a

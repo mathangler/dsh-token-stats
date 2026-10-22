@@ -47,7 +47,8 @@ dsh plugin --profile web add github:mathangler/dsh-token-stats
 **插件在插件清单里的条目也一样** —— `locale/en.json` 与 `locale/zh.json` 提供它的
 标题和说明，宿主**不激活插件**就能从导出的资源里读到，所以即使插件处于禁用状态，
 那一行也是翻译过的。本 profile 的语言偏好是 `zh`，正好对应 `locale/zh.json`；
-英文文件同时是其它语言的兜底。
+英文文件同时是其它语言的兜底。图标沿用本 profile 其它插件的同一套样式 —— 36×36
+圆角渐变底 + 白色 1.6px 线条，图形是贡献网格，也就是这个插件本来要画的东西。
 
 刷新会立即返回，并在后台重新扫描，这期间屏幕上保留原有数字。宿主的
 `sessionQuery` 提供 `observeSession` 时，正在运行的会话通过该观测读取；不提供时

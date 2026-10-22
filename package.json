@@ -1,6 +1,6 @@
 {
   "name": "dsh-token-stats",
-  "version": "0.1.17",
+  "version": "0.1.18",
   "description": "Token usage statistics for DeepSeek Harness: lifetime totals, daily peak, a GitHub-style contribution heatmap, per-model daily trends and a per-model share chart, mounted as a Settings page.",
   "type": "module",
   "main": "lib/index.js",
@@ -9,6 +9,8 @@
     "./host-core": "./lib/host-core.js",
     "./client": "./lib/client.js",
     "./cordis.patch.yml": "./cordis.patch.yml",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
     "./package.json": "./package.json"
   },
   "files": [
@@ -16,6 +18,8 @@
     "lib/host-core.js",
     "lib/client.js",
     "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
     "README.md",
     "README.zh.md",
     "LICENSE"

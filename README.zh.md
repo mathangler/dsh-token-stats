@@ -43,6 +43,12 @@ dsh plugin --profile web add github:mathangler/dsh-token-stats
 补丁会往 profile 里插一行宿主半边。浏览器半边由 `package.json` 里的
 `dsh.client.platform: web` 声明自动加载。开发与验证基于 DSH `0.1.5-rc.1`。
 
+面板跟随宿主语言：所有文案都以中英文注册到 `locale` 服务，切换语言会即时重绘。
+**插件在插件清单里的条目也一样** —— `locale/en.json` 与 `locale/zh.json` 提供它的
+标题和说明，宿主**不激活插件**就能从导出的资源里读到，所以即使插件处于禁用状态，
+那一行也是翻译过的。本 profile 的语言偏好是 `zh`，正好对应 `locale/zh.json`；
+英文文件同时是其它语言的兜底。
+
 刷新会立即返回，并在后台重新扫描，这期间屏幕上保留原有数字。宿主的
 `sessionQuery` 提供 `observeSession` 时，正在运行的会话通过该观测读取；不提供时
 插件依然可用，只是改为整份读取会话日志。

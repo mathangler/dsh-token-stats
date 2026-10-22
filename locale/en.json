@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Token usage",
+    "description": "Lifetime token totals, a daily/weekly contribution heatmap you can page back through all of history, per-model daily trends and a per-model share chart, mounted as a Settings page."
+  }
+}

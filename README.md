@@ -64,6 +64,14 @@ The bundle patch inserts one host row into the profile. The browser half is
 loaded automatically because `package.json` declares `dsh.client.platform: web`.
 Built and verified against DSH `0.1.5-rc.1`.
 
+The panel follows the harness language: every string is registered with the
+`locale` service in English and Chinese, and it re-renders on a language change.
+The plugin's own entry in the plugin inventory does too — `locale/en.json` and
+`locale/zh.json` carry its title and description, which the harness reads from the
+exported resources without activating the plugin, so the row is translated even
+while the plugin is disabled. `locale/zh.json` matches the `zh` preference this
+profile sets; the English file is also the fallback for any other language.
+
 A refresh answers immediately and keeps the numbers on screen while the rescan
 runs behind it. A harness whose `sessionQuery` offers `observeSession` reads a
 running session through that observation; on a harness without it the plugin

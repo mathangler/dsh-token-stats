@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Token usage heatmap">
+  <!-- A contribution grid, the panel's own subject: sixteen days, four of them busier
+       than the rest. Original artwork for this plugin, drawn to read at row-icon size. -->
+  <g fill="#dce8f5">
+    <rect x="2" y="2" width="12" height="12" rx="2.5"/>
+    <rect x="18" y="2" width="12" height="12" rx="2.5"/>
+    <rect x="34" y="2" width="12" height="12" rx="2.5"/>
+    <rect x="50" y="2" width="12" height="12" rx="2.5"/>
+    <rect x="2" y="18" width="12" height="12" rx="2.5"/>
+    <rect x="18" y="18" width="12" height="12" rx="2.5"/>
+    <rect x="34" y="18" width="12" height="12" rx="2.5"/>
+    <rect x="50" y="18" width="12" height="12" rx="2.5"/>
+    <rect x="2" y="34" width="12" height="12" rx="2.5"/>
+    <rect x="18" y="34" width="12" height="12" rx="2.5"/>
+    <rect x="34" y="34" width="12" height="12" rx="2.5"/>
+    <rect x="50" y="34" width="12" height="12" rx="2.5"/>
+    <rect x="2" y="50" width="12" height="12" rx="2.5"/>
+    <rect x="18" y="50" width="12" height="12" rx="2.5"/>
+    <rect x="34" y="50" width="12" height="12" rx="2.5"/>
+    <rect x="50" y="50" width="12" height="12" rx="2.5"/>
+  </g>
+  <g fill="#a9cdec">
+    <rect x="18" y="18" width="12" height="12" rx="2.5"/>
+    <rect x="50" y="34" width="12" height="12" rx="2.5"/>
+  </g>
+  <g fill="#6aa9dc">
+    <rect x="34" y="18" width="12" height="12" rx="2.5"/>
+    <rect x="34" y="50" width="12" height="12" rx="2.5"/>
+  </g>
+  <g fill="#2f7fc4">
+    <rect x="34" y="34" width="12" height="12" rx="2.5"/>
+  </g>
+</svg>

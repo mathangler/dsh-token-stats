@@ -74,6 +74,16 @@ profile sets; the English file is also the fallback for any other language. Its
 icon follows the same 36×36 gradient tile and white line art as the other plugins
 in this profile, drawn as a contribution grid — the thing the plugin exists to draw.
 
+The **settings sidebar glyph** uses the harness's `settings.section.icon` seat: the
+shell renders the row's button and label itself and substitutes whatever is registered
+under the same id as the section, falling back to its gear only when nothing matches.
+The registered glyph is a bar chart on a 16-unit grid, `stroke: currentColor` so the
+row's normal, hover and selected colours come for free, and its geometry was measured
+against the shipped icons beside it (average ink box 12.25 × 12.39 from about
+(1.9, 2.0); this one is 12.4 × 12.1 from (1.8, 2.1)). A shell without that seat — and
+therefore without any way to hand a third-party section its own glyph — still gets the
+older DOM fallback, and the two paths cannot override each other.
+
 A refresh answers immediately and keeps the numbers on screen while the rescan
 runs behind it. A harness whose `sessionQuery` offers `observeSession` reads a
 running session through that observation; on a harness without it the plugin

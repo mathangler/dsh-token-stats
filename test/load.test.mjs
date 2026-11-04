@@ -137,15 +137,16 @@ function loadClient(activeLocale = 'zh') {
 test('the bundle registers itself under the package name', () => {
   const loaded = loadClient();
   assert.equal(loaded.mod.apply !== undefined, true);
-  assert.equal(loaded.injected.length, 1);
-  assert.deepEqual(loaded.injected, ['settings.section']);
+  // The panel and its sidebar glyph are two seats, and both are requested through
+  // `inject` so each waits for its own declaration.
+  assert.deepEqual(loaded.injected, ['settings.section', 'settings.section.icon']);
 });
 
 test('the client registers one settings section with the agreed contract', () => {
   const loaded = loadClient('zh');
-  assert.equal(loaded.registrations.length, 1, 'exactly one settings.section registration');
-  const registration = loaded.registrations[0];
-  assert.equal(registration.name, 'settings.section');
+  const sections = loaded.registrations.filter((entry) => entry.name === 'settings.section');
+  assert.equal(sections.length, 1, 'exactly one settings.section registration');
+  const registration = sections[0];
   assert.equal(registration.id, 'token-stats');
   assert.equal(registration.order, 40);
   assert.equal(typeof registration.label, 'function', 'label must be a thunk so it recomputes on locale change');
@@ -154,9 +155,11 @@ test('the client registers one settings section with the agreed contract', () =>
 });
 
 test('the section label follows the active locale', () => {
-  assert.equal(loadClient('en').registrations[0].label(), 'Usage');
-  assert.equal(loadClient('en-US').registrations[0].label(), 'Usage');
-  assert.equal(loadClient('zh-CN').registrations[0].label(), '用量统计');
+  const labelFor = (locale) => loadClient(locale).registrations
+    .find((entry) => entry.name === 'settings.section').label();
+  assert.equal(labelFor('en'), 'Usage');
+  assert.equal(labelFor('en-US'), 'Usage');
+  assert.equal(labelFor('zh-CN'), '用量统计');
 });
 
 test('both locale dictionaries register and stay in sync', () => {
@@ -171,14 +174,49 @@ test('both locale dictionaries register and stay in sync', () => {
   assert.equal(zh.title, '用量统计');
 });
 
+test('the sidebar row gets its own glyph through the icon seat', () => {
+  const loaded = loadClient();
+  // The shell substitutes whatever is registered under the *section's* id and falls
+  // back to the settings gear otherwise, so the two ids must agree exactly.
+  assert.ok(loaded.injected.includes('settings.section.icon'), 'the icon seat must be requested');
+  const section = loaded.registrations.find((entry) => entry.name === 'settings.section');
+  const icon = loaded.registrations.find((entry) => entry.name === 'settings.section.icon');
+  assert.ok(section !== undefined && icon !== undefined, 'both the panel and its glyph must register');
+  assert.equal(icon.id, section.id, 'the glyph id must equal the section id or it never renders');
+
+  const { SectionIcon } = loaded.mod.__test.components;
+  assert.equal(typeof SectionIcon, 'function');
+
+  // Drawn at whatever size the row asks for, in the current text colour, on the same
+  // 16-unit grid and stroke weight the shipped nav icons use.
+  const at16 = SectionIcon({ size: 16, active: false });
+  assert.equal(at16.type, 'svg');
+  assert.equal(at16.props.width, 16);
+  assert.equal(at16.props.height, 16);
+  assert.equal(at16.props.viewBox, '0 0 16 16');
+  assert.equal(at16.props.stroke, 'currentColor', 'colour must follow the row state, not be baked in');
+  assert.equal(at16.props.strokeWidth, 1.4);
+  assert.equal(String(at16.props.fill), 'none', 'an outline glyph, not a filled one');
+  assert.equal(at16.props['aria-hidden'], 'true', 'the row owns the accessible name');
+  assert.ok(at16.props['data-dts-nav-icon'] !== undefined, 'the legacy fallback identifies it by this');
+
+  // It carries real geometry, and honours a different requested size.
+  const paths = collectAll(at16).filter((node) => node.type === 'path');
+  assert.equal(paths.length, 4, 'baseline plus three bars');
+  assert.ok(paths.every((node) => typeof node.props.d === 'string' && node.props.d.length > 4));
+  assert.equal(SectionIcon({ size: 24 }).props.width, 24, 'the shell sets the edge');
+  assert.equal(SectionIcon({}).props.width, 16, 'and a missing size falls back to the nav default');
+});
+
 test('the stylesheet is injected and tied to the fiber', () => {
   const loaded = loadClient();
   assert.equal(loaded.styleTags.length, 1);
   assert.equal(loaded.styleTags[0].dataset.plugin, 'dsh-token-stats');
   const css = loaded.styleTags[0].textContent;
   assert.equal(typeof css, 'string');
-  assert.ok(css.includes('button[data-dsh-token-stats-nav] > svg{display:none}'), 'nav glyph rule must be present');
-  assert.ok(css.includes('mask:url("data:image/svg+xml;utf8,'), 'nav glyph must be a mask so it follows state colours');
+  assert.ok(css.includes('button[data-dsh-token-stats-nav] > svg:not([data-dts-nav-icon]){display:none}'),
+    'the legacy nav rule must leave a shell-rendered icon alone');
+  assert.ok(css.includes('mask:url("data:image/svg+xml;utf8,'), 'the legacy glyph must be a mask so it follows state colours');
   const styleEffect = loaded.effects.find((entry) => entry.label.includes('stylesheet'));
   assert.ok(styleEffect !== undefined, 'the style tag must hang on ctx.effect');
   styleEffect.dispose();

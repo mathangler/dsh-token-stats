@@ -41,7 +41,10 @@ dsh plugin --profile web add github:mathangler/dsh-token-stats
 装完重启正在运行的 `dsh web` 进程。
 
 补丁会往 profile 里插一行宿主半边。浏览器半边由 `package.json` 里的
-`dsh.client.platform: web` 声明自动加载。开发与验证基于 DSH `0.1.5-rc.1`。
+`dsh.client.platform: web` 声明自动加载。开发与验证基于 DSH `0.2.3-alpha.2`。
+请求准入跟随宿主：新版由路由自身的 `auth: 'required'` 把门，老版若仍有
+`connection.requestRejection` 就继续用它 —— 该方法是**挂载时探测**的，因为删掉它的
+宿主会让处理函数里直接抛异常，表现为一个没有响应体的 `400`。
 
 面板跟随宿主语言：所有文案都以中英文注册到 `locale` 服务，切换语言会即时重绘。
 **插件在插件清单里的条目也一样** —— `locale/en.json` 与 `locale/zh.json` 提供它的

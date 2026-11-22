@@ -20,16 +20,19 @@ import { apply, CHANNEL } from '../lib/index.js';
  * present, which is what a full composition looks like; the stub reports every
  * optional key as available so the eager warm-up path is exercised too.
  */
-function mount(config) {
+function mount(config, options = {}) {
   const routes = [];
   const disposers = [];
   const warmups = [];
+  // The trust fence is read through `ctx.get('connection')`: current harnesses removed
+  // `requestRejection` (the web server's route `auth` is the fence there), so a stub
+  // offers it only when a test asks for a legacy composition.
+  const connection = options.connection === undefined ? undefined : options.connection;
   const ctx = {
     effect: (fn) => { const dispose = fn(); disposers.push(dispose); return dispose; },
-    get: () => undefined,
+    get: (name) => (name === 'connection' ? connection : undefined),
     inject: (names, run) => { warmups.push(names); run(); },
     webServer: { register: (route) => { routes.push(route); return () => {}; } },
-    connection: { requestRejection: (req) => req.rejectAs },
   };
   apply(ctx, config);
   return {
@@ -61,8 +64,8 @@ function fakeResponse() {
 }
 
 /** Run one request through the mounted route. */
-async function call(options, config) {
-  const mounted = mount(config);
+async function call(options, config, mountOptions) {
+  const mounted = mount(config, mountOptions);
   const res = fakeResponse();
   await mounted.route.handler(fakeRequest(options), res);
   mounted.dispose();
@@ -80,10 +83,24 @@ test('the route is published as a prefix on the plugin channel', () => {
 });
 
 test('an untrusted caller is rejected before any read', async () => {
-  const { res, parsed } = await call({ rejectAs: 401, body: '{ not json' });
+  const { res, parsed } = await call(
+    { rejectAs: 401, body: '{ not json' },
+    undefined,
+    { connection: { requestRejection: (req) => req.rejectAs } },
+  );
   assert.equal(res.statusCode, 401);
   assert.equal(res.body, '', 'a rejected request must not receive a body');
   assert.equal(parsed, null);
+});
+
+test('a harness without requestRejection still serves, instead of throwing', async () => {
+  // This is the regression the route hit when the harness moved admission into the
+  // route `auth` and dropped the old method: calling it threw inside the handler, and
+  // the server reported that as a bodiless 400.
+  const { res, parsed } = await call({});
+  assert.equal(res.statusCode, 200, 'a bodiless 400 was the old failure');
+  assert.ok(parsed !== null, 'the answer must still be a JSON envelope');
+  assert.equal(res.headers['content-type'], 'application/json; charset=utf-8');
 });
 
 test('a non-POST method is refused with 405 and an Allow header', async () => {
@@ -201,19 +218,32 @@ test('a successful call answers the value envelope with the payload', async () =
   assert.equal(res.headers['cache-control'], 'no-store');
 });
 
-test('nothing is served without the platform fence being consulted', async () => {
+test('the route declares the platform fence, and the legacy one is honoured', async () => {
+  // The current fence is the route's own `auth`: the server refuses an unauthenticated
+  // caller before the handler runs, so the handler never fences by itself.
+  const mounted = mount();
+  assert.equal(mounted.route.auth, 'required', 'the route must require an admitted Peer');
+  mounted.dispose();
+
+  // On a harness that still has the old explicit fence, it is consulted first.
   let consulted = 0;
-  const routes = [];
-  const ctx = {
-    effect: (fn) => { const dispose = fn(); return dispose; },
-    get: () => undefined,
-    inject: (names, run) => { run(); },
-    webServer: { register: (route) => { routes.push(route); return () => {}; } },
+  const legacy = mount(undefined, {
     connection: { requestRejection: () => { consulted += 1; return 401; } },
-  };
-  apply(ctx, {});
+  });
+  assert.equal(legacy.route.auth, 'required');
   const res = fakeResponse();
-  await routes[0].handler(fakeRequest({}), res);
-  assert.equal(consulted, 1, 'every request must pass through requestRejection');
+  await legacy.route.handler(fakeRequest({}), res);
+  assert.equal(consulted, 1, 'the legacy fence must be consulted when the harness has one');
   assert.equal(res.statusCode, 401);
+  legacy.dispose();
+
+  // A connection service that exists but no longer carries the method is not a fault.
+  let served = 0;
+  const modern = mount(undefined, { connection: { admit: () => ({ kind: 'allow' }) } });
+  const ok = fakeResponse();
+  await modern.route.handler(fakeRequest({}), ok);
+  assert.equal(ok.statusCode, 200);
+  served += 1;
+  assert.equal(served, 1);
+  modern.dispose();
 });

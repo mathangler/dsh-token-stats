@@ -62,7 +62,11 @@ Then restart the running `dsh web` process.
 
 The bundle patch inserts one host row into the profile. The browser half is
 loaded automatically because `package.json` declares `dsh.client.platform: web`.
-Built and verified against DSH `0.1.5-rc.1`.
+Built and verified against DSH `0.2.3-alpha.2`. Request admission follows the
+harness: a current one fences the route through its own `auth: 'required'`, while an
+older one is still fenced by `connection.requestRejection` when that method exists —
+it is probed at mount time, because a harness that dropped it would otherwise throw
+inside the handler and answer a bodiless `400`.
 
 The panel follows the harness language: every string is registered with the
 `locale` service in English and Chinese, and it re-renders on a language change.
